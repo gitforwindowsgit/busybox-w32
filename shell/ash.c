@@ -2163,7 +2163,6 @@ stack_add_system_drive(const char *path)
 {
 	char *p;
 
-	path = mingw_pathconv(path);
 	p = growstackto(strlen(path));
 
 	strcpy(p, path);

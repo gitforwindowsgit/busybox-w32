@@ -1,3 +1,4 @@
+#include <wchar.h>
 #include "libbb.h"
 #include <userenv.h>
 #include "lazyload.h"
@@ -49,53 +50,207 @@ static mode_t current_umask = DEFAULT_UMASK;
 
 #pragma GCC optimize ("no-if-conversion")
 
-/* This function is not thread safe. Does it need to be? */
-const char *mingw_pathconv(const char *path)
+static inline int wisdirsep(wchar_t w)
 {
-	static char pseudo_root[PATH_MAX];
+	return w == L'\\' || w == L'/';
+}
+
+static inline int whasdosdriveprefix(const wchar_t *wpath)
+{
+	return *wpath && wpath[1] == L':';
+}
+
+static int wisrelpath(const wchar_t *wpath)
+{
+	return !wisdirsep(wpath[0]) && !whasdosdriveprefix(wpath);
+}
+
+static wchar_t *pathconv_rest(wchar_t *result, int offset, const char *path)
+{
+	wchar_t *p, *q, *slash;
+
+	if (!MultiByteToWideChar(CP_UTF8, 0, path, -1,
+				result + offset, PATH_MAX_LONG - offset)) {
+		errno = ENAMETOOLONG;
+		return NULL;
+	}
+
+	slash = result + offset - 1;
+
+	/* normalize ., .. and / */
+	for (p = result + offset, q = p; *p; p++)
+		if (wisdirsep(*p)) {
+			/* beginning of a UNC path? */
+			if (p == result && wisdirsep(p[1])) {
+				*(q++) = L'\\';
+				p++;
+			}
+			if (p != slash + 1)
+				*(q++) = L'\\';
+			/* condense runs of slashes */
+			while (wisdirsep(p[1]))
+				p++;
+			slash = p;
+		} else if (*p == L'.' && slash + 1 == p) {
+			/* single . means: same directory */
+			if (wisdirsep(p[1]))
+				slash = ++p;
+			else if (!p[1])
+				q--; /* `q` still points at a slash */
+			/* .. means: parent directory */
+			else if (p[1] == L'.' && wisdirsep(p[2])) {
+				/* search for parent directory */
+				if (q - result > 2) {
+					slash = q - 2;
+					while (!wisdirsep(*slash) &&
+					       slash - result > 2)
+						slash--;
+					if (slash - result > 2)
+						q = slash + 1;
+				}
+
+				p += 2;
+				slash = p;
+			} else if (p[1] == L'.' && !p[2]) {
+				/* search for parent directory */
+				if (q - result > 2) {
+					slash = q - 2;
+					while (!wisdirsep(*slash) &&
+					       slash - result > 2)
+						slash--;
+					if (slash - result > 2)
+						q = slash;
+				} else
+					q--;
+				break;
+			} else
+				*(q++) = *p;
+		} else
+			*(q++) = *p;
+	*q = L'\0';
+
+
+	return result;
+}
+
+/* This function is not thread safe. Does it need to be? */
+wchar_t *mingw_pathconv(const char *path)
+{
+	static wchar_t pseudo_root[PATH_MAX];
 #define MAX_CONCURRENT_PATHCONV 64
-	static char tmp[MAX_CONCURRENT_PATHCONV][PATH_MAX];
+	static wchar_t tmp[MAX_CONCURRENT_PATHCONV][PATH_MAX_LONG];
 	static int pseudo_root_len, next;
-	char *result;
+	wchar_t *result;
 
 	if (!path || !*path) {
 		bb_error_msg("can't convert empty path");
 		return NULL;
 	}
 
-	if (path[0] != '/' || path[1] == '/')
-		return path;
-
 	if (next >= MAX_CONCURRENT_PATHCONV)
 		next = 0;
+	result = tmp[next++];
 
-	if (isalpha(path[1]) && path[2] == '/') {
-		result = tmp[next++];
-		result[0] = path[1];
-		result[1] = ':';
-		safe_strncpy(result + 2, path + 2, PATH_MAX - 2);
-		return result;
+	if (!strcmp(path, "/dev/null"))
+		return pathconv_rest(result, 0, "NUL");
+
+	if (path[0] != '/') {
+		/* regular absolute path with drive prefix */
+		if (isalpha(path[0]) && path[1] == ':') {
+			wcscpy(result, L"\\\\?\\");
+			return pathconv_rest(result, 4, path);
+		}
+
+		/* relative path */
+		if (path[0] != '\\') {
+			DWORD len;
+
+			/* NUL is special */
+			if (!strcasecmp(path, "NUL"))
+				return pathconv_rest(result, 0, path);
+
+			wcscpy(result, L"\\\\?\\");
+			len = GetCurrentDirectoryW(PATH_MAX_LONG - 4,
+					result + 4);
+			if (len + 6 >= PATH_MAX_LONG) {
+				errno = ENAMETOOLONG;
+				return NULL;
+			}
+			if (!wcsncmp(result + 4, L"\\\\?\\", 4)) {
+				/* cwd already has \\?\ prefix */
+				result += 4;
+				len -= 4;
+			}
+			if (!len || !isalpha(result[4]) || result[5] != L':') {
+				fprintf(stderr, "cwd lacks drive\n");
+				errno = EINVAL;
+				return NULL;
+			}
+			result[len + 4] = L'\\';
+			return pathconv_rest(result, len + 5, path);
+		}
+
+		/* UNC path */
+		if (path[1] == '\\')
+			return pathconv_rest(result, 0, path);
+
+		/* absolute path missing drive prefix */
+		wcscpy(result, L"\\\\?\\");
+		/* obtain current directory, just for the drive prefix */
+		if (!GetCurrentDirectoryW(PATH_MAX_LONG - 4, result + 4) ||
+				!isalpha(result[4]) || result[5] != L':') {
+			fprintf(stderr, "Current directory lacks drive\n");
+			errno = EINVAL;
+			return NULL;
+		}
+		return pathconv_rest(result, 6, path);
 	}
 
-	if (!_strnicmp(path + 1, "tmp/", 4)) {
-		const char *temp = getenv("TEMP");
-		size_t len = strlen(temp);
+	/* UNC path with forward slashes */
+	if (path[1] == '/')
+		return pathconv_rest(result, 0, path);
 
-		if (len >= PATH_MAX)
-			len = PATH_MAX - 1;
+	/* MINGW-style /<drive>/<path> */
+	if (isalpha(path[1]) && path[2] == '/') {
+		wcscpy(result, L"\\\\?\\");
+		result[4] = towupper(path[1]);
+		result[5] = L':';
+		result[6] = L'\\';
+		return pathconv_rest(result, 7, path + 2);
+	}
 
-		if (len && is_dir_sep(temp[len - 1]))
-			len--;
+	/* /tmp/ is mapped to %TEMP% */
+	if (!_strnicmp(path + 1, "tmp", 3) && (!path[4] || is_dir_sep(path[4]))) {
+		wchar_t *temp = _wgetenv(L"TEMP");
+		size_t len = wcslen(temp), i;
 
-		result = tmp[next++];
-		memcpy(result, temp, len);
-		safe_strncpy(result + len, path + 4, PATH_MAX - len);
-		return result;
+		if (!isalpha(temp[0]) || temp[1] != L':') {
+			fprintf(stderr, "TEMP lacks drive: '%S'\n", temp);
+			errno = EINVAL;
+			return NULL;
+		}
+		if (len + 6 >= PATH_MAX_LONG) {
+			errno = ENAMETOOLONG;
+			return NULL;
+		}
+		wcscpy(result, L"\\\\?\\");
+		for (i = 0; i < len; i++)
+			result[4 + i] = temp[i] == L'/' ? L'\\' : temp[i];
+		if (result[len + 3] != L'\\')
+			result[len++ + 4] = L'\\';
+		return pathconv_rest(result, len + 4, path + 4 + !!is_dir_sep(path[4]));
 	}
 
 	if (!*pseudo_root) {
 		const char *exec_path = bb_busybox_exec_path;
 		size_t len = strlen(exec_path);
+		wchar_t *p;
+
+		/* skip \\?\ prefix, if any */
+		if (!strncmp(exec_path, "\\\\?\\", 4)) {
+			exec_path += 4;
+			len -= 4;
+		}
 
 		if (len > 5 && !_strnicmp(exec_path + len - 4, ".exe", 4)) {
 			len -= 3;
@@ -129,19 +284,27 @@ const char *mingw_pathconv(const char *path)
 			len = 2;
 		}
 
-		safe_strncpy(pseudo_root, exec_path, len + 1);
-		pseudo_root_len = len;
-		if (pseudo_root_len + 1 < PATH_MAX &&
-				pseudo_root[pseudo_root_len - 1] != '/')
-			pseudo_root[pseudo_root_len++] = '/';
+		wcscpy(pseudo_root, L"\\\\?\\");
+		pseudo_root_len = MultiByteToWideChar(CP_UTF8, 0,
+				exec_path, len + 1,
+				pseudo_root + 4, PATH_MAX_LONG - 4);
+		if (!pseudo_root_len) {
+			fprintf(stderr, "Could not convert '%.*s'\n",
+					(int)len + 1, exec_path);
+			errno = EINVAL;
+			return NULL;
+		}
+		pseudo_root_len += 4;
+		for (p = pseudo_root + 4; p != pseudo_root + pseudo_root_len; p++)
+			if (*p == L'/')
+				*p = L'\\';
+		if (pseudo_root_len + 1 < PATH_MAX_LONG &&
+				pseudo_root[pseudo_root_len - 1] != L'\\')
+			pseudo_root[pseudo_root_len++] = L'\\';
 	}
 
-	result = tmp[next++];
-	memcpy(result, pseudo_root, pseudo_root_len);
-	safe_strncpy(result + pseudo_root_len, path + 1,
-		PATH_MAX - pseudo_root_len);
-
-	return result;
+	memcpy(result, pseudo_root, pseudo_root_len * sizeof(wchar_t));
+	return pathconv_rest(result, pseudo_root_len, path + 1);
 }
 
 int err_win_to_posix(void)
@@ -296,6 +459,16 @@ int get_dev_type(const char *filename)
 	return NOT_DEVICE;
 }
 
+static int get_dev_typeW(const wchar_t *wpath)
+{
+	if (wpath && !wcsncmp(wpath, L"/dev/", 5))
+		return !wcscmp(wpath + 5, L"null") ||
+			!wcscmp(wpath + 5, L"zero") ||
+			!wcscmp(wpath + 5, L"random");
+
+	return NOT_DEVICE;
+}
+
 void update_special_fd(int dev, int fd)
 {
 	if (dev == DEV_ZERO)
@@ -317,7 +490,25 @@ static int get_dev_fd(const char *filename)
 	return -1;
 }
 
-static int mingw_is_directory(const char *path);
+static inline int is_digitW(wchar_t c)
+{
+	return c >= L'0' && c <= L'9';
+}
+
+static int get_dev_fdW(const wchar_t *wpath)
+{
+	int fd;
+
+	if (wpath && !wcsncmp(wpath, L"/dev/fd/", 8) && is_digitW(wpath[8]) && !wpath[9]) {
+		fd = wpath[8] - L'0';
+		if ((HANDLE)_get_osfhandle(fd) != INVALID_HANDLE_VALUE)
+			return fd;
+	}
+	return -1;
+}
+
+static int mingw_is_directory(const wchar_t *wpath);
+
 #undef open
 int mingw_open (const char *filename, int oflags, ...)
 {
@@ -326,29 +517,32 @@ int mingw_open (const char *filename, int oflags, ...)
 	int fd;
 	int special = (oflags & O_SPECIAL);
 	int dev = get_dev_type(filename);
+	const wchar_t *wpath;
 
 	/* /dev/null is always allowed, others only if O_SPECIAL is set */
 	if (dev == DEV_NULL || (special && dev != NOT_DEVICE)) {
-		filename = "nul";
+		wpath = L"NUL";
 		oflags = O_RDWR;
 	}
 	else if ((fd=get_dev_fd(filename)) >= 0) {
 		return fd;
 	}
 	else if (filename) {
-		filename = mingw_pathconv(filename);
+		wpath = mingw_pathconv(filename);
 	}
+	else
+		return -1;
 
 	va_start(args, oflags);
 	mode = va_arg(args, int);
 	va_end(args);
 
-	fd = open(filename, oflags&~O_SPECIAL, mode);
+	fd = _wopen(wpath, oflags&~O_SPECIAL, mode);
 	if (fd >= 0) {
 		update_special_fd(dev, fd);
 	}
 	else if ((oflags & O_ACCMODE) != O_RDONLY && errno == EACCES) {
-		if (mingw_is_directory(filename))
+		if (mingw_is_directory(wpath))
 			errno = EISDIR;
 	}
 	return fd;
@@ -378,15 +572,22 @@ ssize_t FAST_FUNC mingw_open_read_close(const char *fn, void *buf, size_t size)
 #undef fopen
 FILE *mingw_fopen (const char *filename, const char *otype)
 {
+	const wchar_t *wpath;
+	wchar_t wotype[16];
 	int fd;
 
 	if (get_dev_type(filename) == DEV_NULL)
-		filename = "nul";
+		wpath = L"NUL";
 	else if ((fd=get_dev_fd(filename)) >= 0)
 		return fdopen(fd, otype);
 	else if (filename)
-		filename = mingw_pathconv(filename);
-	return fopen(filename, otype);
+		wpath = mingw_pathconv(filename);
+	else
+		return NULL;
+
+	if (!MultiByteToWideChar(CP_UTF8, 0, otype, -1, wotype, 16))
+		return NULL;
+	return _wfopen(wpath, wotype);
 }
 
 #undef read
@@ -457,12 +658,11 @@ static inline mode_t file_attr_to_st_mode(DWORD attr)
 	return fMode;
 }
 
-static int get_file_attr(const char *fname, WIN32_FILE_ATTRIBUTE_DATA *fdata)
+static int get_file_attr(const wchar_t *wpath, WIN32_FILE_ATTRIBUTE_DATA *fdata)
 {
 	size_t len;
-	fname = mingw_pathconv(fname);
 
-	if (get_dev_type(fname) != NOT_DEVICE || get_dev_fd(fname) >= 0) {
+	if (get_dev_typeW(wpath) != NOT_DEVICE || get_dev_fdW(wpath) >= 0) {
 		/* Fake attributes for special devices */
 		FILETIME epoch = {0xd53e8000, 0x019db1de};	// Unix epoch as FILETIME
 		fdata->dwFileAttributes = FILE_ATTRIBUTE_DEVICE;
@@ -472,16 +672,16 @@ static int get_file_attr(const char *fname, WIN32_FILE_ATTRIBUTE_DATA *fdata)
 		return 0;
 	}
 
-	if (GetFileAttributesExA(fname, GetFileExInfoStandard, fdata)) {
+	if (GetFileAttributesExW(wpath, GetFileExInfoStandard, fdata)) {
 		fdata->dwFileAttributes &= ~FILE_ATTRIBUTE_DEVICE;
 		return 0;
 	}
 
 	if (GetLastError() == ERROR_SHARING_VIOLATION) {
 		HANDLE hnd;
-		WIN32_FIND_DATA fd;
+		WIN32_FIND_DATAW fd;
 
-		if ((hnd=FindFirstFile(fname, &fd)) != INVALID_HANDLE_VALUE) {
+		if ((hnd=FindFirstFileW(wpath, &fd)) != INVALID_HANDLE_VALUE) {
 			fdata->dwFileAttributes =
 					fd.dwFileAttributes & ~FILE_ATTRIBUTE_DEVICE;
 			fdata->ftCreationTime = fd.ftCreationTime;
@@ -505,8 +705,8 @@ static int get_file_attr(const char *fname, WIN32_FILE_ATTRIBUTE_DATA *fdata)
 	case ERROR_NOT_ENOUGH_MEMORY:
 		return ENOMEM;
 	case ERROR_INVALID_NAME:
-		len = strlen(fname);
-		if (len > 1 && (fname[len-1] == '/' || fname[len-1] == '\\'))
+		len = wcslen(wpath);
+		if (len > 1 && (wpath[len-1] == '/' || wpath[len-1] == '\\'))
 			return ENOTDIR;
 	default:
 		return ENOENT;
@@ -666,11 +866,11 @@ static uid_t file_owner(HANDLE fh)
 }
 #endif
 
-static DWORD get_symlink_data(DWORD attr, const char *pathname,
-					WIN32_FIND_DATAA *fbuf)
+static DWORD get_symlink_data(DWORD attr, wchar_t *wpath,
+					WIN32_FIND_DATAW *fbuf)
 {
 	if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
-		HANDLE handle = FindFirstFileA(pathname, fbuf);
+		HANDLE handle = FindFirstFileW(wpath, fbuf);
 		if (handle != INVALID_HANDLE_VALUE) {
 			FindClose(handle);
 			if ((fbuf->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
@@ -685,23 +885,21 @@ static DWORD get_symlink_data(DWORD attr, const char *pathname,
 	return 0;
 }
 
-static DWORD is_symlink(const char *pathname)
+static DWORD is_symlink(wchar_t *wpath)
 {
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
-	WIN32_FIND_DATAA fbuf;
+	WIN32_FIND_DATAW fbuf;
 
-	pathname = mingw_pathconv(pathname);
-	if (!get_file_attr(pathname, &fdata))
-		return get_symlink_data(fdata.dwFileAttributes, pathname, &fbuf);
+	if (!get_file_attr(wpath, &fdata))
+		return get_symlink_data(fdata.dwFileAttributes, wpath, &fbuf);
 	return 0;
 }
 
-static int mingw_is_directory(const char *path)
+static int mingw_is_directory(const wchar_t *wpath)
 {
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
 
-	path = mingw_pathconv(path);
-	return get_file_attr(path, &fdata) == 0 &&
+	return get_file_attr(wpath, &fdata) == 0 &&
 				(fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
@@ -731,8 +929,9 @@ static int count_subdirs(const char *pathname)
 static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 {
 	int err = EINVAL;
+	wchar_t *wpath;
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
-	WIN32_FIND_DATAA findbuf;
+	WIN32_FIND_DATAW findbuf;
 	DWORD low, high;
 	off64_t size;
 	ssize_t len;
@@ -757,14 +956,14 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 		return 0;
 	}
 
-	file_name = mingw_pathconv(file_name);
-	while (file_name && !(err=get_file_attr(file_name, &fdata))) {
+	wpath = mingw_pathconv(file_name);
+	while (wpath && !(err=get_file_attr(wpath, &fdata))) {
 		buf->st_ino = 0;
 		buf->st_uid = DEFAULT_UID;
 		buf->st_gid = DEFAULT_GID;
 		buf->st_dev = buf->st_rdev = 0;
 		buf->st_tag =
-			get_symlink_data(fdata.dwFileAttributes, file_name, &findbuf);
+			get_symlink_data(fdata.dwFileAttributes, wpath, &findbuf);
 
 		if (buf->st_tag) {
 			if (follow) {
@@ -772,6 +971,7 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 				 * a symlink.  Use the canonicalized path instead. */
 				err = errno;
 				file_name = auto_string(xmalloc_realpath(file_name));
+				wpath = mingw_pathconv(file_name);
 				continue;
 			}
 
@@ -827,7 +1027,7 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 #endif
 
 		/* Get actual size of compressed/sparse files */
-		low = GetCompressedFileSize(file_name, &high);
+		low = GetCompressedFileSizeW(wpath, &high);
 		if ((low == INVALID_FILE_SIZE && GetLastError() != NO_ERROR) ||
 				(buf->st_attr & FILE_ATTRIBUTE_DIRECTORY)) {
 			size = buf->st_size;
@@ -987,18 +1187,22 @@ int utimensat(int fd, const char *path, const struct timespec times[2],
 	int rc = -1;
 	HANDLE fh;
 	DWORD cflag = FILE_FLAG_BACKUP_SEMANTICS;
+	wchar_t *wpath;
 
 	if (is_relative_path(path) && fd != AT_FDCWD) {
 		errno = ENOSYS;	// partial implementation
 		return rc;
 	}
 
+	wpath = mingw_pathconv(path);
+	if (!wpath)
+		return -1;
+
 	if (flags & AT_SYMLINK_NOFOLLOW)
 		cflag |= FILE_FLAG_OPEN_REPARSE_POINT;
 
-	path = mingw_pathconv(path);
-	fh = CreateFile(path, FILE_WRITE_ATTRIBUTES, 0, NULL, OPEN_EXISTING,
-					cflag, NULL);
+	fh = CreateFileW(wpath, FILE_WRITE_ATTRIBUTES, 0, NULL, OPEN_EXISTING,
+			cflag, NULL);
 	if (fh == INVALID_HANDLE_VALUE) {
 		errno = err_win_to_posix();
 		return rc;
@@ -1139,36 +1343,40 @@ char *mingw_getcwd(char *pointer, int len)
 int mingw_rename(const char *pold, const char *pnew)
 {
 	DWORD attrs;
+	wchar_t *wold = mingw_pathconv(pold);
+	wchar_t *wnew = mingw_pathconv(pnew);
 
-	pold = mingw_pathconv(pold);
-	pnew = mingw_pathconv(pnew);
+	if (!wold || !wnew)
+		return -1;
 
 	/*
 	 * For non-symlinks, try native rename() first to get errno right.
 	 * It is based on MoveFile(), which cannot overwrite existing files.
 	 */
-	if (!is_symlink(pold)) {
+	if (!is_symlink(wold)) {
+		if (!_wrename(wold, wnew))
+			return 0;
 		if (!rename(pold, pnew))
 			return 0;
 		if (errno != EEXIST)
 			return -1;
 	}
-	if (MoveFileEx(pold, pnew,
+	if (MoveFileExW(wold, wnew,
 				MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
 		return 0;
 	/* TODO: translate more errors */
 	if (GetLastError() == ERROR_ACCESS_DENIED &&
-	    (attrs = GetFileAttributes(pnew)) != INVALID_FILE_ATTRIBUTES) {
+	    (attrs = GetFileAttributesW(wnew)) != INVALID_FILE_ATTRIBUTES) {
 		if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
 			errno = EISDIR;
 			return -1;
 		}
 		if ((attrs & FILE_ATTRIBUTE_READONLY) &&
-		    SetFileAttributes(pnew, attrs & ~FILE_ATTRIBUTE_READONLY)) {
-			if (MoveFileEx(pold, pnew, MOVEFILE_REPLACE_EXISTING))
+		    SetFileAttributesW(wnew, attrs & ~FILE_ATTRIBUTE_READONLY)) {
+			if (MoveFileExW(wold, wnew, MOVEFILE_REPLACE_EXISTING))
 				return 0;
 			/* revert file attributes on failure */
-			SetFileAttributes(pnew, attrs);
+			SetFileAttributesW(wnew, attrs);
 		}
 	}
 	errno = EACCES;
@@ -1371,18 +1579,41 @@ clock_t times(struct tms *buf)
 
 int link(const char *oldpath, const char *newpath)
 {
-	DECLARE_PROC_ADDR(BOOL, CreateHardLinkA, LPCSTR, LPCSTR,
+	wchar_t *woldpath = mingw_pathconv(oldpath);
+	wchar_t *wnewpath = mingw_pathconv(newpath);
+	DECLARE_PROC_ADDR(BOOL, CreateHardLinkW, LPWSTR, LPWSTR,
 						LPSECURITY_ATTRIBUTES);
 
-	if (!INIT_PROC_ADDR(kernel32.dll, CreateHardLinkA)) {
+	if (!INIT_PROC_ADDR(kernel32.dll, CreateHardLinkW)) {
 		return -1;
 	}
-	oldpath = mingw_pathconv(oldpath);
-	newpath = mingw_pathconv(newpath);
-	if (!CreateHardLinkA(newpath, oldpath, NULL)) {
+	if (!CreateHardLinkW(wnewpath, woldpath, NULL)) {
 		errno = err_win_to_posix();
 		return -1;
 	}
+	return 0;
+}
+
+static inline int utftowcs(const char *in, wchar_t *out, size_t size)
+{
+	int out_size = MultiByteToWideChar(CP_UTF8, 0, in, -1, NULL, 0);
+	wchar_t *p;
+
+	if (out_size >= size) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	if (!out_size && *in) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	MultiByteToWideChar(CP_UTF8, 0, in, -1, out, out_size);
+	for (p = out; *p; p++)
+		if (*p == L'/')
+			*p = L'\\';
+
 	return 0;
 }
 
@@ -1396,12 +1627,17 @@ int link(const char *oldpath, const char *newpath)
 int symlink(const char *target, const char *linkpath)
 {
 	DWORD flag = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-	DECLARE_PROC_ADDR(BOOLEAN, CreateSymbolicLinkA, LPCSTR, LPCSTR, DWORD);
-	char *targ, *relative = NULL;
+	DECLARE_PROC_ADDR(BOOLEAN, CreateSymbolicLinkW, LPWSTR, LPWSTR, DWORD);
+	wchar_t wtarget[PATH_MAX_LONG], *wlinkpath;
+	char *relative = NULL;
 
-	if (!INIT_PROC_ADDR(kernel32.dll, CreateSymbolicLinkA)) {
+	if (!INIT_PROC_ADDR(kernel32.dll, CreateSymbolicLinkW)) {
 		return -1;
 	}
+
+	if (utftowcs(target, wtarget, sizeof(wtarget) / sizeof(*wtarget)) < 0)
+		return -1;
+	wlinkpath = mingw_pathconv(linkpath);
 
 	if (is_relative_path(target) && has_path(linkpath)) {
 		/* make target's path relative to current directory */
@@ -1410,15 +1646,12 @@ int symlink(const char *target, const char *linkpath)
 						(int)(name - linkpath), linkpath, target);
 	}
 
-	if (mingw_is_directory(relative ?: target))
+	if (mingw_is_directory(relative ? mingw_pathconv(relative) : wtarget))
 		flag |= SYMBOLIC_LINK_FLAG_DIRECTORY;
 	free(relative);
 
-	targ = auto_string(strdup(target));
-	slash_to_bs(targ);
-
  retry:
-	if (!CreateSymbolicLinkA(linkpath, targ, flag)) {
+	if (!CreateSymbolicLinkW(wlinkpath, wtarget, flag)) {
 		/* Old Windows versions see 'UNPRIVILEGED_CREATE' as an invalid
 		 * parameter.  Retry without it. */
 		if ((flag & SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) &&
@@ -1587,53 +1820,138 @@ static wchar_t *normalize_ntpath(wchar_t *wbuf)
 	return wbuf;
 }
 
-static char *normalize_ntpathA(char *buf)
+#define SRPB rptr->SymbolicLinkReparseBuffer
+static wchar_t *wreadlink(wchar_t *wpath)
 {
-	/* fix absolute path prefixes */
-	if (buf[0] == '\\') {
-		/* strip NT namespace prefixes */
-		if (is_prefixed_with(buf, "\\??\\") ||
-				is_prefixed_with(buf, "\\\\?\\"))
-			buf += 4;
-		else if (is_prefixed_with_case(buf, "\\DosDevices\\"))
-			buf += 12;
-		/* replace remaining '...UNC\' with '\\' */
-		if (is_prefixed_with_case(buf, "UNC\\")) {
-			buf += 2;
-			*buf = '\\';
+	HANDLE h = CreateFileW(wpath, 0, 0, NULL, OPEN_EXISTING,
+				FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	if (h != INVALID_HANDLE_VALUE) {
+		DWORD nbytes;
+		BYTE rbuf[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+		PREPARSE_DATA_BUFFER rptr = (PREPARSE_DATA_BUFFER)rbuf;
+		BOOL status;
+		size_t len;
+		wchar_t *name = NULL, *res;
+
+		status = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0,
+					rptr, sizeof(rbuf), &nbytes, NULL);
+		CloseHandle(h);
+
+		if (!status) {
+			errno = err_win_to_posix();
+			return NULL;
 		}
+
+		if (rptr->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+			len = SRPB.SubstituteNameLength/sizeof(WCHAR);
+			name = SRPB.PathBuffer + SRPB.SubstituteNameOffset/sizeof(WCHAR);
+		} else if (rptr->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) {
+			len = MRPB.SubstituteNameLength/sizeof(WCHAR);
+			name = MRPB.PathBuffer + MRPB.SubstituteNameOffset/sizeof(WCHAR);
+		}
+
+		if (!name) {
+			errno = ENOSYS;
+			return NULL;
+		}
+
+		res = xmalloc(2 * (len + 1));
+		memcpy(res, name, 2 * len);
+		res[len] = L'\0';
+
+		return res;
 	}
-	return buf;
+
+	errno = err_win_to_posix();
+	return NULL;
 }
 
-static char *resolve_symlinks(char *path)
+/*
+ * This routine is not the same as realpath(), which
+ * canonicalizes the given path completely. This routine only
+ * follows trailing symlinks until a real file is reached and
+ * returns its name. If the path ends in a dangling link or if
+ * the target doesn't exist, the path is returned in any case.
+ * Intermediate symlinks in the path are not expanded -- only
+ * those at the tail.
+ * A malloced char* is returned, which must be freed by the caller.
+ */
+static wchar_t *wfollow_symlinks(wchar_t *wpath)
+{
+	wchar_t *buf = wcsdup(wpath);
+	wchar_t *p, *q;
+	wchar_t *wlinkpath;
+	size_t bufsize;
+	int looping = MAXSYMLINKS + 1;
+
+	goto jump_in;
+
+	while (1) {
+		wlinkpath = wreadlink(buf);
+		if (!wlinkpath) {
+			/* not a symlink, or doesn't exist */
+			if (errno == EINVAL || errno == ENOENT || errno == ENOSYS)
+				return buf;
+			goto free_buf_ret_null;
+		}
+
+		if (!--looping) {
+			errno = ELOOP;
+			free(wlinkpath);
+ free_buf_ret_null:
+			free(buf);
+			return NULL;
+		}
+
+		if (wisrelpath(wlinkpath)) {
+			wchar_t normalized[PATH_MAX_LONG];
+
+			bufsize += wcslen(wlinkpath);
+			buf = xrealloc(buf, 2 * bufsize);
+			for (q = p = buf; *p; p++)
+				if (wisdirsep(*p))
+					q = p + 1;
+			wcscpy(q, wlinkpath);
+			if (_wfullpath(normalized, buf, PATH_MAX_LONG))
+				wcscpy(buf, normalized);
+			free(wlinkpath);
+		} else {
+			free(buf);
+			buf = wlinkpath;
+ jump_in:
+			bufsize = wcslen(buf) + 1;
+		}
+	}
+}
+
+static wchar_t *resolve_symlinks(wchar_t *wpath)
 {
 	HANDLE h;
 	DWORD status;
-	char *ptr = NULL;
-	DECLARE_PROC_ADDR(DWORD, GetFinalPathNameByHandleA, HANDLE,
-						LPSTR, DWORD, DWORD);
-	char *resolve = NULL;
+	wchar_t *ptr = NULL;
+	DECLARE_PROC_ADDR(DWORD, GetFinalPathNameByHandleW, HANDLE,
+						LPWSTR, DWORD, DWORD);
+	wchar_t *resolve = NULL;
 
-	if (GetFileAttributesA(path) & FILE_ATTRIBUTE_REPARSE_POINT) {
-		resolve = xmalloc_follow_symlinks(path);
+	if (GetFileAttributesW(wpath) & FILE_ATTRIBUTE_REPARSE_POINT) {
+		resolve = wfollow_symlinks(wpath);
 		if (!resolve)
 			return NULL;
 	}
 
 	/* need a file handle to resolve symlinks */
-	h = CreateFileA(resolve ?: path, 0, 0, NULL, OPEN_EXISTING,
+	h = CreateFileW(resolve ?: wpath, 0, 0, NULL, OPEN_EXISTING,
 				FILE_FLAG_BACKUP_SEMANTICS, NULL);
 	if (h != INVALID_HANDLE_VALUE) {
-		if (!INIT_PROC_ADDR(kernel32.dll, GetFinalPathNameByHandleA)) {
+		if (!INIT_PROC_ADDR(kernel32.dll, GetFinalPathNameByHandleW)) {
 			goto end;
 		}
 
 		/* normalize the path and return it on success */
-		status = GetFinalPathNameByHandleA(h, path, MAX_PATH,
+		status = GetFinalPathNameByHandleW(h, wpath, MAX_PATH,
 							FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
 		if (status != 0 && status < MAX_PATH) {
-			ptr = normalize_ntpathA(path);
+			ptr = normalize_ntpath(wpath);
 			goto end;
 		}
 	}
@@ -1654,36 +1972,66 @@ static char *resolve_symlinks(char *path)
  * - resolve_symlinks checks that the file exists (by opening it) and
  *   resolves symlinks by calling GetFinalPathNameByHandleA.
  */
-char *realpath(const char *path, char *resolved_path)
+static wchar_t *wrealpath(wchar_t *wpath, wchar_t *resolved_path)
 {
-	char buffer[MAX_PATH];
-	char *real_path, *p;
+	wchar_t *real_path;
 
 	/* enforce glibc pre-2.3 behaviour */
-	if (path == NULL || resolved_path == NULL) {
+	if (wpath == NULL || resolved_path == NULL) {
 		errno = EINVAL;
 		return NULL;
 	}
 
-	path = mingw_pathconv(path);
-	if (_fullpath(buffer, path, MAX_PATH) &&
-			(real_path=resolve_symlinks(buffer))) {
-		bs_to_slash(strcpy(resolved_path, real_path));
-		p = last_char_is(resolved_path, '/');
-		if (p && p > resolved_path && p[-1] != ':')
-			*p = '\0';
+	if (_wfullpath(resolved_path, wpath, PATH_MAX_LONG) &&
+	    (resolved_path = resolve_symlinks(resolved_path))) {
+		size_t len = wcslen(resolved_path);
+
+		if (len > 0 && real_path[len - 1] == L'\\' &&
+		    (len < 2 || real_path[len - 2] != L':'))
+			real_path[len - 1] = L'\0';
+
 		return resolved_path;
 	}
 	return NULL;
 }
 
-#define SRPB rptr->SymbolicLinkReparseBuffer
+static inline int wcstoutf(wchar_t *in, char *out, size_t size)
+{
+	int out_size = WideCharToMultiByte(CP_UTF8, 0, in, -1, NULL, 0, NULL, NULL);
+
+	if (out_size >= size) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	if (!out_size && *in) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	WideCharToMultiByte(CP_UTF8, 0, in, -1, out, out_size, NULL, NULL);
+	bs_to_slash(out);
+	return 0;
+}
+
+char *realpath(const char *path, char *resolved_path)
+{
+	wchar_t *wpath = mingw_pathconv(path);
+	wchar_t buffer[PATH_MAX_LONG];
+	wchar_t *resolved = wrealpath(wpath, buffer);
+
+	if (!resolved || wcstoutf(resolved, resolved_path, MAX_PATH) < 0)
+		return NULL;
+	return resolved_path;
+}
+
 /* Non-standard feature:  if buf is NULL just return the length. */
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
 {
+	wchar_t *wpath = mingw_pathconv(pathname);
 	HANDLE h;
 
-	h = CreateFile(pathname, 0, 0, NULL, OPEN_EXISTING,
+	h = CreateFileW(wpath, 0, 0, NULL, OPEN_EXISTING,
 				FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS, NULL);
 	if (h != INVALID_HANDLE_VALUE) {
 		DWORD nbytes;
@@ -1749,11 +2097,15 @@ int mingw_mkdir(const char *path, int mode UNUSED_PARAM)
 	int ret;
 	struct stat st;
 	int lerrno = 0;
+	const wchar_t *wpath;
 
-	path = mingw_pathconv(path);
-	if ( (ret=mkdir(path)) < 0 ) {
+	wpath = mingw_pathconv(path);
+	if (!wpath)
+		return -1;
+	if ((ret = _wmkdir(wpath)) < 0) {
 		lerrno = errno;
-		if ( lerrno == EACCES && stat(path, &st) == 0 ) {
+		/* NEEDSWORK: avoid double `mingw_pathconv()` */
+		if (lerrno == EACCES && !do_lstat(1, path, &st)) {
 			ret = 0;
 			lerrno = 0;
 		}
@@ -1763,29 +2115,49 @@ int mingw_mkdir(const char *path, int mode UNUSED_PARAM)
 	return ret;
 }
 
+static void wfixpathcase(wchar_t *wpath)
+{
+	wchar_t resolved[PATH_MAX_LONG];
+
+	// Canonicalise path: for physical drives this makes case match
+	// what's stored on disk.  For mapped drives, not so much.
+	if (wrealpath(wpath, resolved) && !wcsicmp(wpath, resolved))
+		wcscpy(wpath, resolved);
+
+	// make drive letter or UNC hostname uppercase
+	if (wpath[0] >= L'a' && wpath[0] <= L'z' && wpath[1] == L':')
+		*wpath = towupper(*wpath);
+	else if (wisdirsep(wpath[0]) && wisdirsep(wpath[1]))
+		for (wpath += 2; !wisdirsep(*wpath); ++wpath) {
+			*wpath = towupper(*wpath);
+		}
+}
+
 #undef chdir
 int mingw_chdir(const char *dirname)
 {
 	int ret = -1;
-	const char *realdir = dirname;
+	wchar_t *wpath = mingw_pathconv(dirname);
+	wchar_t *realdir = wpath, wbuf[PATH_MAX_LONG];
 
-	dirname = mingw_pathconv(dirname);
-
-	if (is_symlink(dirname)) {
-		realdir = auto_string(xmalloc_realpath(dirname));
+	if (is_symlink(wpath)) {
+		realdir = wrealpath(wpath, wbuf);
 		if (realdir)
-			fix_path_case((char *)realdir);
+			wfixpathcase(realdir);
 	}
 
 	if (realdir) {
-		ret = chdir(realdir);
+		if (!wcsncmp(realdir, L"\\\\?\\", 4))
+			realdir += 4;
+
+		ret = _wchdir(realdir);
 
 		if (ret < 0) {
-			char shortpath[PATH_MAX];
+			wchar_t shortpath[PATH_MAX_LONG];
 			int saved_errno = errno;
 
-			if (GetShortPathNameA(realdir, shortpath, PATH_MAX))
-				ret = chdir(shortpath);
+			if (GetShortPathNameW(realdir, shortpath, PATH_MAX))
+				ret = _wchdir(shortpath);
 			else
 				errno = saved_errno;
 		}
@@ -1797,10 +2169,12 @@ int mingw_chdir(const char *dirname)
 #undef chmod
 int mingw_chmod(const char *path, int mode)
 {
-	if (mingw_is_directory(path))
+	wchar_t *wpath = mingw_pathconv(path);
+
+	if (mingw_is_directory(wpath))
 		mode |= 0222;
 
-	return chmod(path, mode);
+	return _wchmod(wpath, mode);
 }
 
 int fcntl(int fd, int cmd, ...)
@@ -1851,17 +2225,20 @@ int fcntl(int fd, int cmd, ...)
 int mingw_unlink(const char *pathname)
 {
 	int ret;
+	wchar_t *wpath = mingw_pathconv(pathname);
+
+	if (!wpath)
+		return -1;
 
 	/* read-only files cannot be removed */
-	pathname = mingw_pathconv(pathname);
-	chmod(pathname, 0666);
+	_wchmod(wpath, 0666);
 
-	ret = unlink(pathname);
+	ret = _wunlink(wpath);
 	if (ret == -1 && errno == EACCES) {
 		/* a symlink to a directory needs to be removed by calling rmdir */
 		/* (the *real* Windows rmdir, not mingw_rmdir) */
-		if (is_symlink(pathname)) {
-			return rmdir(pathname);
+		if (is_symlink(wpath)) {
+			return _wrmdir(wpath);
 		}
 	}
 	return ret;
@@ -2015,16 +2392,20 @@ int mingw_access(const char *name, int mode)
 {
 	int ret;
 	struct stat s;
+	wchar_t *wpath = mingw_pathconv(name);
 
-	name = mingw_pathconv(name);
+	if (!wpath)
+		return -1;
+
 	/* Windows can only handle test for existence, read or write */
 	if (mode == F_OK || (mode & ~X_OK)) {
-		ret = _access(name, mode & ~X_OK);
+		ret = _waccess(wpath, mode & ~X_OK);
 		if (ret < 0 || !(mode & X_OK)) {
 			return ret;
 		}
 	}
 
+	/* NEEDSWORK: avoid double mingw_pathconv() */
 	if (!mingw_stat(name, &s)) {
 		if ((s.st_mode&S_IXUSR)) {
 			return 0;
@@ -2037,16 +2418,20 @@ int mingw_access(const char *name, int mode)
 
 int mingw_rmdir(const char *path)
 {
+	wchar_t *wpath = mingw_pathconv(path);
+
+	if (!wpath)
+		return -1;
+
 	/* On Linux rmdir(2) doesn't remove symlinks */
-	if (is_symlink(path)) {
+	if (is_symlink(wpath)) {
 		errno = ENOTDIR;
 		return -1;
 	}
 
 	/* read-only directories cannot be removed */
-	path = mingw_pathconv(path);
-	chmod(path, 0666);
-	return rmdir(path);
+	_wchmod(wpath, 0666);
+	return _wrmdir(wpath);
 }
 
 void mingw_sync(void)

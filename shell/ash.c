@@ -10260,7 +10260,7 @@ evalcommand(union node *cmd, int flags)
 
 	expredir(cmd->ncmd.redirect);
 	redir_stop = pushredir(cmd->ncmd.redirect);
-#ifdef BASH_XTRACEFD
+#if BASH_XTRACEFD
 	xtracefd = lookupvar("BASH_XTRACEFD");
 	if (!xtracefd || (preverrout_fd = atoi(xtracefd)) < 0)
 #endif

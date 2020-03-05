@@ -4778,6 +4778,7 @@ waitpid_child(int *status, int wait_flags)
 	if (idx < pid_nr) {
 		GetExitCodeProcess(proclist[idx], &win_status);
 		*status = (int)win_status << 8;
+	    CloseHandle(proclist[idx]);
 		pid = pidlist[idx];
 	}
  done:
@@ -15728,6 +15729,13 @@ spawn_forkshell(struct forkshell *fs, struct job *jp, union node *n, int mode)
 	sprintf(buf, "%p", new->hMapFile);
 	argv[2] = buf;
 	ret = spawnve(P_NOWAIT, bb_busybox_exec_path, (char *const *)argv, environ);
+	if (ret != -1) {
+	    HANDLE hCurrentProcess = GetCurrentProcess();
+		if (!DuplicateHandle(hCurrentProcess, (HANDLE)ret, hCurrentProcess,
+				(HANDLE*)&ret, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			ret = -1;
+		}
+	}
 	CloseHandle(new->hMapFile);
 	UnmapViewOfFile(new);
 	if (ret == -1) {

@@ -1206,6 +1206,7 @@ trace_printf(const char *fmt, ...)
 	va_start(va, fmt);
 	vfprintf(tracefile, fmt, va);
 	va_end(va);
+	fflush(tracefile);
 }
 
 static void
@@ -10263,7 +10264,7 @@ evalpipe(union node *n, int flags)
 	int pip[2];
 	int status = 0;
 
-	TRACE(("evalpipe(0x%lx) called\n", (long)n));
+	TRACE(("evalpipe(0x%p) called\n", (n)));
 	pipelen = 0;
 	for (lp = n->npipe.cmdlist; lp; lp = lp->next)
 		pipelen++;
@@ -10913,7 +10914,7 @@ evalcommand(union node *cmd, int flags)
 		lineno -= funcline - 1;
 
 	/* First expand the arguments. */
-	TRACE(("evalcommand(0x%lx, %d) called\n", (long)cmd, flags));
+	TRACE(("evalcommand(0x%p, %d) called\n", cmd, flags));
 	file_stop = g_parsefile;
 	back_exitstatus = 0;
 

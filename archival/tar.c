@@ -308,7 +308,7 @@ static int writeTarHeader(struct TarBallInfo *tbInfo,
 
 	memset(&header, 0, sizeof(header));
 
-	strncpy(header.name, header_name, sizeof(header.name));
+	strncpy(header.name, header_name, sizeof(header.name) - 1);
 
 	/* POSIX says to mask mode with 07777. */
 	PUT_OCTAL(header.mode, statbuf->st_mode & 07777);
@@ -338,7 +338,7 @@ static int writeTarHeader(struct TarBallInfo *tbInfo,
 		if (!lpath)
 			return FALSE;
 		header.typeflag = SYMTYPE;
-		strncpy(header.linkname, lpath, sizeof(header.linkname));
+		strncpy(header.linkname, lpath, sizeof(header.linkname) - 1);
 # if ENABLE_FEATURE_TAR_GNU_EXTENSIONS
 		/* Write out long linkname if needed */
 		if (header.linkname[sizeof(header.linkname)-1])

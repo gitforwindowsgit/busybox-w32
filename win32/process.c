@@ -3,6 +3,163 @@
 #include <psapi.h>
 #include "lazyload.h"
 
+#define WARGV_OOM ((void *)(intptr_t)-1ll)
+
+static wchar_t **argv_to_wargv(char *const *argv)
+{
+	size_t size = 0, count = 1;
+	wchar_t **w0, *w1, **wargv;
+	int i;
+
+	if (!argv)
+		return NULL;
+
+	for (i = 0; argv[i]; i++) {
+		count++;
+		size += MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, NULL, 0);
+	}
+	wargv = malloc(count * sizeof(wchar_t *) + size * sizeof(wchar_t));
+	if (!wargv)
+		return WARGV_OOM;
+	w0 = wargv;
+	w1 = (void *)(w0 + count);
+	for (i = 0; argv[i]; i++) {
+		*(w0++) = w1;
+		w1 += MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, w1, size);
+	}
+	*w0 = NULL;
+
+	return wargv;
+}
+
+static struct {
+	CRITICAL_SECTION mutex;
+	int nr, alloc;
+	HANDLE *h;
+} spawned_processes;
+
+#ifndef SIGRTMAX
+#define SIGRTMAX 63
+#endif
+
+static void kill_spawned_processes_on_signal(void)
+{
+        DWORD status;
+	int i;
+
+	/*
+	 * Only continue if the process was terminated by a signal, as
+	 * indicated by the exit status (128 + sig_no).
+	 *
+	 * As we are running in an atexit() handler, the exit code has been
+	 * set at this stage by the ExitProcess() function already.
+	 */
+	if (!GetExitCodeProcess(GetCurrentProcess(), &status) ||
+			status <= 128 || status > 128 + SIGRTMAX)
+		return;
+
+	EnterCriticalSection(&spawned_processes.mutex);
+	for (i = 0; i < spawned_processes.nr; i++) {
+		if (GetExitCodeProcess(spawned_processes.h[i], &status) &&
+				status == STILL_ACTIVE)
+			kill_SIGTERM_by_handle(spawned_processes.h[i]);
+		CloseHandle(spawned_processes.h[i]);
+	}
+	spawned_processes.nr = 0;
+	LeaveCriticalSection(&spawned_processes.mutex);
+}
+
+static void cull_exited_processes(void)
+{
+	DWORD status;
+	int i;
+
+	EnterCriticalSection(&spawned_processes.mutex);
+	/* cull exited processes */
+	for (i = 0; i < spawned_processes.nr; i++)
+		if (GetExitCodeProcess(spawned_processes.h[i], &status) &&
+				status != STILL_ACTIVE) {
+			CloseHandle(spawned_processes.h[i]);
+			spawned_processes.h[i] =
+				spawned_processes.h[--spawned_processes.nr];
+			i--;
+		}
+	LeaveCriticalSection(&spawned_processes.mutex);
+}
+
+static void exit_process_on_signal(HANDLE process)
+{
+	cull_exited_processes();
+	EnterCriticalSection(&spawned_processes.mutex);
+	/* grow array if necessary */
+	if (spawned_processes.nr == spawned_processes.alloc) {
+		int new_alloc = (spawned_processes.alloc + 8) * 3 / 2;
+		HANDLE *new_h = realloc(spawned_processes.h,
+				new_alloc * sizeof(HANDLE));
+		if (!new_h) {
+			LeaveCriticalSection(&spawned_processes.mutex);
+			return; /* punt */
+		}
+		spawned_processes.h = new_h;
+		spawned_processes.alloc = new_alloc;
+	}
+
+	spawned_processes.h[spawned_processes.nr++] = process;
+	LeaveCriticalSection(&spawned_processes.mutex);
+}
+
+void initialize_critical_sections(void)
+{
+	InitializeCriticalSection(&spawned_processes.mutex);
+	atexit(kill_spawned_processes_on_signal);
+}
+
+static intptr_t mingw_spawnve(int mode,
+		const char *cmd, char *const *argv, char *const *env)
+{
+	wchar_t wcmd[PATH_MAX], **wargv, **wenv;
+	intptr_t ret;
+
+	wargv = argv_to_wargv(argv);
+	wenv = argv_to_wargv(env);
+	if (!MultiByteToWideChar(CP_ACP, 0, mingw_pathconv(cmd), -1, wcmd, PATH_MAX) ||
+	    wargv == WARGV_OOM || wenv == WARGV_OOM) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	/*
+	 * We cannot use _P_WAIT here because we need to kill spawned processes
+	 * if we're killed, and _P_WAIT does not let us.
+	 */
+	ret = _wspawnve(_P_NOWAIT, wcmd,
+		(const wchar_t *const *)wargv, (const wchar_t *const *)wenv);
+
+	if (ret != (intptr_t)-1)
+		exit_process_on_signal((HANDLE)ret);
+
+	free(wargv);
+	free(wenv);
+
+	if (ret == (intptr_t)-1 || mode != _P_WAIT)
+		return ret;
+
+	for (;;) {
+		DWORD exit_code;
+		WaitForSingleObject((HANDLE)ret, INFINITE);
+		if (!GetExitCodeProcess((HANDLE)ret, &exit_code)) {
+			errno = err_win_to_posix();
+			CloseHandle((HANDLE)ret);
+			return -1;
+		}
+		if (exit_code != STILL_ACTIVE) {
+			cull_exited_processes();
+			CloseHandle((HANDLE)ret);
+			return (intptr_t)exit_code;
+		}
+	}
+}
+
 pid_t waitpid(pid_t pid, int *status, int options)
 #if ENABLE_TIME
 {
@@ -107,12 +264,42 @@ parse_interpreter(const char *cmd, interp_t *interp)
 	return 0;
 }
 
+static char *quote_arg_msys2(const char *arg)
+{
+	int escapes = 0, has_white_space = 0;
+	const char *p;
+	char *q, *result;
+
+	for (p = arg; *p; p++)
+		if (isspace(*p))
+			has_white_space = 1;
+		else if (*p == '"' || *p == '\\')
+			escapes++;
+
+	if (!escapes && !has_white_space && p != arg)
+		return (char *)arg;
+
+	q = result = malloc(p - arg + escapes + 3);
+	if (!q)
+		return (char *)arg; /* out of memory: punt */
+	*(q++) = '"';
+	for (p = arg; *p; p++) {
+		if (*p == '"' || *p == '\\')
+			*(q++) = '\\';
+		*(q++) = *p;
+	}
+	*(q++) = '"';
+	*q = '\0';
+
+	return result;
+}
+
 /*
  * See https://docs.microsoft.com/en-us/cpp/cpp/main-function-command-line-args?view=vs-2019#parsing-c-command-line-arguments
  * (Parsing C++ Command-Line Arguments)
  */
 static char *
-quote_arg(const char *arg)
+quote_arg_mingw(const char *arg)
 {
 	int len = 0, n = 0;
 	int force_quotes = 0;
@@ -217,6 +404,25 @@ find_first_executable(const char *name)
 	return exe_path;
 }
 
+static inline int is_slash(char c)
+{
+	return c == '/' || c == '\\';
+}
+
+static int is_msys2_cmd(const char *cmd)
+{
+	int len = strlen(cmd);
+
+	if (len < 9)
+		return 0;
+
+	while (len-- && !is_slash(cmd[len]))
+		; /* do nothing */
+	return len > 7 && is_slash(cmd[len - 8]) && is_slash(cmd[len - 4]) &&
+		!_strnicmp(cmd + len - 7, "usr", 3) &&
+		!_strnicmp(cmd + len - 3, "bin", 3);
+}
+
 static intptr_t
 spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 {
@@ -225,6 +431,9 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 	int i, argc;
 	intptr_t ret;
 	struct stat st;
+
+	char *(*quote_arg)(const char *);
+	quote_arg = is_msys2_cmd(path) ? quote_arg_msys2 : quote_arg_mingw;
 
 	path = mingw_pathconv(path);
 
@@ -270,7 +479,7 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 		new_path = xasprintf("%s.", path);
 	}
 
-	ret = spawnve(mode, new_path ? new_path : path, new_argv, env);
+	ret = mingw_spawnve(mode, new_path ? new_path : path, new_argv, env);
 
  done:
 	for (i = 0;i < argc;i++)
@@ -733,6 +942,7 @@ int kill_SIGTERM_by_handle(HANDLE process)
 	DWORD code;
 	int ret = 0;
 
+	cull_exited_processes();
 	if (GetExitCodeProcess(process, &code) && code == STILL_ACTIVE) {
 		DECLARE_PROC_ADDR(DWORD, ExitProcess, LPVOID);
 		PVOID arg = (PVOID)(intptr_t)(128 + SIGTERM);

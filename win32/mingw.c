@@ -1420,6 +1420,8 @@ int mingw_chdir(const char *dirname)
 	int ret = -1;
 	const char *realdir = dirname;
 
+	dirname = mingw_pathconv(dirname);
+
 	if (lstat(dirname, &st) == 0 && S_ISLNK(st.st_mode)) {
 		realdir = auto_string(xmalloc_readlink(dirname));
 		if (realdir)

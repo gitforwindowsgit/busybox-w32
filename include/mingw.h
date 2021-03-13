@@ -588,3 +588,5 @@ int has_path(const char *file);
 int is_relative_path(const char *path);
 char *get_last_slash(const char *path);
 const char *applet_to_exe(const char *name);
+
+void initialize_critical_sections(void);

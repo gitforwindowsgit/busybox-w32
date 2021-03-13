@@ -491,6 +491,27 @@ int mingw_isatty(int fd);
 int utimes(const char *file_name, const struct timeval times[2]);
 
 /*
+ * dirent.h
+ */
+struct dirent {
+	char d_name[PATH_MAX];
+};
+
+struct DIR {
+	struct dirent dirent;
+	HANDLE handle;
+	WIN32_FIND_DATA find_data;
+};
+typedef struct DIR DIR;
+
+DIR *mingw_opendir(const char *path);
+struct dirent *mingw_readdir(DIR *dir);
+int mingw_closedir(DIR *dir);
+#define opendir mingw_opendir
+#define readdir mingw_readdir
+#define closedir mingw_closedir
+
+/*
  * Functions with different prototypes in BusyBox and WIN32
  */
 #define itoa bb_itoa
@@ -530,6 +551,7 @@ const char *get_busybox_exec_path(void);
 void init_winsock(void);
 void init_codepage(void);
 
+const char *mingw_pathconv(const char *path);
 int has_bat_suffix(const char *p);
 int has_exe_suffix(const char *p);
 int has_exe_suffix_or_dot(const char *name);

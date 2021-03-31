@@ -7,7 +7,7 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v2
-    - uses: git-for-windows/setup-git-for-windows-sdk@v0
+    - uses: git-for-windows/setup-git-for-windows-sdk@v1
       with:
         flavor: build-installers # this includes all the required tools
     - name: restrict PATH to Git for Windows' SDK (and Windows)

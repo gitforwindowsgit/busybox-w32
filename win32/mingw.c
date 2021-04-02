@@ -101,6 +101,16 @@ const char *mingw_pathconv(const char *path)
 				    isdigit(exec_path[len - 2]) &&
 				    !_strnicmp(exec_path + len - 7, "mingw", 5))
 					len -= 8;
+			} else if (len > 8 + 8 && is_dir_sep(exec_path[len - 8]) &&
+			    !_strnicmp(exec_path + len - 7, "busybox", 7) &&
+			     is_dir_sep(exec_path[len - 8 - 8]) &&
+			    !_strnicmp(exec_path + len - 8 - 7, "libexec", 7)) {
+				len -= 8 + 8;
+				if (len > 8 && is_dir_sep(exec_path[len - 8]) &&
+				    isdigit(exec_path[len - 1]) &&
+				    isdigit(exec_path[len - 2]) &&
+				    !_strnicmp(exec_path + len - 7, "mingw", 5))
+					len -= 8;
 			}
 		}
 

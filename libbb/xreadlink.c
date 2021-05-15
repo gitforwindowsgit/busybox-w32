@@ -76,7 +76,11 @@ char* FAST_FUNC xmalloc_follow_symlinks(const char *path)
 			return NULL;
 		}
 
+#if ENABLE_PLATFORM_MINGW32
+		if (!is_absolute_path(linkpath)) {
+#else
 		if (*linkpath != '/') {
+#endif
 			bufsize += strlen(linkpath);
 			buf = xrealloc(buf, bufsize);
 			lpc = bb_get_last_path_component_strip(buf);
@@ -121,4 +125,63 @@ char* FAST_FUNC xmalloc_realpath(const char *path)
 	/* on error returns NULL (xstrdup(NULL) == NULL) */
 	return xstrdup(realpath(path, buf));
 #endif
+}
+
+char* FAST_FUNC xmalloc_realpath_coreutils(const char *path)
+{
+	char *buf;
+
+	errno = 0;
+	buf = xmalloc_realpath(path);
+	/*
+	 * There is one case when "readlink -f" and
+	 * "realpath" from coreutils succeed,
+	 * even though file does not exist, such as:
+	 *     /tmp/file_does_not_exist
+	 * (the directory must exist).
+	 */
+	if (!buf && errno == ENOENT) {
+		char *last_slash = strrchr(path, '/');
+		if (last_slash) {
+			*last_slash++ = '\0';
+			buf = xmalloc_realpath(path);
+			if (buf) {
+				unsigned len = strlen(buf);
+				buf = xrealloc(buf, len + strlen(last_slash) + 2);
+				buf[len++] = '/';
+				strcpy(buf + len, last_slash);
+			}
+		} else {
+			char *target = xmalloc_readlink(path);
+			if (target) {
+				char *cwd;
+				if (target[0] == '/') {
+					/*
+					 * $ ln -s /bin/qwe symlink  # note: /bin is a link to /usr/bin
+					 * $ readlink -f symlink
+					 * /usr/bin/qwe/target_does_not_exist
+					 * $ realpath symlink
+					 * /usr/bin/qwe/target_does_not_exist
+					 */
+					buf = xmalloc_realpath_coreutils(target);
+					free(target);
+					return buf;
+				}
+				/*
+				 * $ ln -s target_does_not_exist symlink
+				 * $ readlink -f symlink
+				 * /CURDIR/target_does_not_exist
+				 * $ realpath symlink
+				 * /CURDIR/target_does_not_exist
+				 */
+				cwd = xrealloc_getcwd_or_warn(NULL);
+				buf = concat_path_file(cwd, target);
+				free(cwd);
+				free(target);
+				return buf;
+			}
+		}
+	}
+
+	return buf;
 }

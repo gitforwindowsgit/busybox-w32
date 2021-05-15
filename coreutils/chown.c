@@ -7,7 +7,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config CHOWN
-//config:	bool "chown (7.2 kb)"
+//config:	bool "chown (7.6 kb)"
 //config:	default y
 //config:	help
 //config:	chown is used to change the user and/or group ownership
@@ -97,10 +97,10 @@ struct param_t {
 	chown_fptr chown_func;
 };
 
-static int FAST_FUNC fileAction(const char *fileName, struct stat *statbuf,
-		void *vparam, int depth UNUSED_PARAM)
+static int FAST_FUNC fileAction(struct recursive_state *state UNUSED_PARAM,
+		const char *fileName, struct stat *statbuf)
 {
-#define param  (*(struct param_t*)vparam)
+#define param  (*(struct param_t*)state->userData)
 #define opt option_mask32
 	uid_t u = (param.ugid.uid == (uid_t)-1L) ? statbuf->st_uid : param.ugid.uid;
 	gid_t g = (param.ugid.gid == (gid_t)-1L) ? statbuf->st_gid : param.ugid.gid;
@@ -128,9 +128,9 @@ int chown_main(int argc UNUSED_PARAM, char **argv)
 	struct param_t param;
 
 #if ENABLE_FEATURE_CHOWN_LONG_OPTIONS
-	opt = getopt32long(argv, "^" OPT_STR "\0" "=2", chown_longopts);
+	opt = getopt32long(argv, "^" OPT_STR "\0" "-2", chown_longopts);
 #else
-	opt = getopt32(argv, "^" OPT_STR "\0" "=2");
+	opt = getopt32(argv, "^" OPT_STR "\0" "-2");
 #endif
 	argv += optind;
 
@@ -159,8 +159,7 @@ int chown_main(int argc UNUSED_PARAM, char **argv)
 				flags,          /* flags */
 				fileAction,     /* file action */
 				fileAction,     /* dir action */
-				&param,         /* user data */
-				0)              /* depth */
+				&param)         /* user data */
 		) {
 			retval = EXIT_FAILURE;
 		}

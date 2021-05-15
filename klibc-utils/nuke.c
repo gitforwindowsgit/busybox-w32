@@ -4,8 +4,8 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config NUKE
-//config:	bool "nuke"
-//config:	default y
+//config:	bool "nuke (2.9 kb)"
+//config:	default n  # off by default: too "accidentally destructive"
 //config:	help
 //config:	Alias to "rm -rf".
 

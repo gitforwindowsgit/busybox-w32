@@ -19,10 +19,10 @@
 //kbuild:lib-$(CONFIG_CHCON) += chcon.o
 
 //usage:#define chcon_trivial_usage
-//usage:       "[OPTIONS] CONTEXT FILE..."
-//usage:       "\n	chcon [OPTIONS] [-u USER] [-r ROLE] [-l RANGE] [-t TYPE] FILE..."
+//usage:       "[-chfRv] CONTEXT FILE..."
+//usage:       "\n	chcon [-chfRv] [-u USER] [-r ROLE] [-l RANGE] [-t TYPE] FILE..."
 //usage:	IF_LONG_OPTS(
-//usage:       "\n	chcon [OPTIONS] --reference=RFILE FILE..."
+//usage:       "\n	chcon [-chfRv] --reference=RFILE FILE..."
 //usage:	)
 //usage:
 //usage:#define chcon_full_usage "\n\n"
@@ -37,7 +37,7 @@
 //usage:     "\n	-u USER	Set user/role/type/range in the target security context"
 //usage:     "\n	-r ROLE"
 //usage:     "\n	-t TYPE"
-//usage:     "\n	-l RNG"
+//usage:     "\n	-l RANGE"
 //usage:     "\n	-R	Recurse"
 
 #include <selinux/context.h>
@@ -62,11 +62,9 @@ static char *type = NULL;
 static char *range = NULL;
 static char *specified_context = NULL;
 
-static int FAST_FUNC change_filedir_context(
+static int FAST_FUNC change_filedir_context(struct recursive_state *state UNUSED_PARAM,
 		const char *fname,
-		struct stat *stbuf UNUSED_PARAM,
-		void *userData UNUSED_PARAM,
-		int depth UNUSED_PARAM)
+		struct stat *stbuf UNUSED_PARAM)
 {
 	context_t context = NULL;
 	security_context_t file_context = NULL;
@@ -107,7 +105,7 @@ static int FAST_FUNC change_filedir_context(
 
 	context_string = context_str(context);
 	if (!context_string) {
-		bb_error_msg("can't obtain security context in text expression");
+		bb_simple_error_msg("can't obtain security context in text expression");
 		goto skip;
 	}
 
@@ -131,8 +129,10 @@ static int FAST_FUNC change_filedir_context(
 			bb_error_msg("can't change context of %s to %s",
 					fname, context_string);
 		}
-	} else if (option_mask32 & OPT_VERBOSE) {
-		printf("context of %s retained as %s\n", fname, context_string);
+	} else {
+		if (option_mask32 & OPT_VERBOSE) {
+			printf("context of %s retained as %s\n", fname, context_string);
+		}
 		rc = TRUE;
 	}
 skip:
@@ -192,7 +192,7 @@ int chcon_main(int argc UNUSED_PARAM, char **argv)
 		/* specified_context is never NULL -
 		 * "-1" in opt_complementary prevents this. */
 		if (!argv[0])
-			bb_error_msg_and_die("too few arguments");
+			bb_simple_error_msg_and_die("too few arguments");
 	}
 
 	for (i = 0; (fname = argv[i]) != NULL; i++) {
@@ -202,10 +202,10 @@ int chcon_main(int argc UNUSED_PARAM, char **argv)
 		fname[fname_len] = '\0';
 
 		if (recursive_action(fname,
-					1<<option_mask32 & OPT_RECURSIVE,
+					((option_mask32 & OPT_RECURSIVE) ? ACTION_RECURSE : 0),
 					change_filedir_context,
 					change_filedir_context,
-					NULL, 0) != TRUE)
+					NULL) != TRUE)
 			errors = 1;
 	}
 	return errors;

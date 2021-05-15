@@ -38,7 +38,7 @@
 /* 19990508 Busy Boxed! Dave Cinege */
 
 //config:config PRINTF
-//config:	bool "printf (3.3 kb)"
+//config:	bool "printf (3.8 kb)"
 //config:	default y
 //config:	help
 //config:	printf is used to format and print specified strings.
@@ -95,6 +95,12 @@ static int multiconvert(const char *arg, void *result, converter convert)
 
 static void FAST_FUNC conv_strtoull(const char *arg, void *result)
 {
+	/* Allow leading '+' - bb_strtoull() by itself does not allow it,
+	 * and probably shouldn't (other callers might require purely numeric
+	 * inputs to be allowed.
+	 */
+	if (arg[0] == '+')
+		arg++;
 	*(unsigned long long*)result = bb_strtoull(arg, NULL, 0);
 	/* both coreutils 6.10 and bash 3.2:
 	 * $ printf '%x\n' -2
@@ -107,6 +113,8 @@ static void FAST_FUNC conv_strtoull(const char *arg, void *result)
 }
 static void FAST_FUNC conv_strtoll(const char *arg, void *result)
 {
+	if (arg[0] == '+')
+		arg++;
 	*(long long*)result = bb_strtoll(arg, NULL, 0);
 }
 static void FAST_FUNC conv_strtod(const char *arg, void *result)
@@ -142,6 +150,67 @@ static double my_xstrtod(const char *arg)
 	multiconvert(arg, &result, conv_strtod);
 	return result;
 }
+
+#if ENABLE_PLATFORM_MINGW32
+static int buflen = 0;
+static int bufmax = 0;
+static char *buffer = NULL;
+
+static void my_flush(void)
+{
+	if (buffer)
+		full_write(STDOUT_FILENO, buffer, buflen);
+	free(buffer);
+	buffer = NULL;
+	buflen = bufmax = 0;
+}
+
+static int my_putchar(int ch)
+{
+	if (buflen + 1 >= bufmax) {
+		bufmax += 256;
+		buffer = xrealloc(buffer, bufmax);
+	}
+	buffer[buflen++] = ch;
+	if (buflen > 40 && ch == '\n')
+		my_flush();
+	return ch;
+}
+
+static int my_printf(const char *format, ...)
+{
+	va_list list;
+	char *str;
+	int len;
+
+	va_start(list, format);
+	len = vasprintf(&str, format, list);
+	va_end(list);
+
+	if (len < 0)
+		bb_die_memory_exhausted();
+
+	if (buflen + len >= bufmax) {
+		bufmax += 256 + len;
+		buffer = xrealloc(buffer, bufmax);
+	}
+	memcpy(buffer + buflen, str, len);
+	buflen += len;
+	free(str);
+
+	if (buflen > 40 && buffer[buflen-1] == '\n')
+		my_flush();
+
+	return len;
+}
+
+#undef bb_putchar
+#undef putchar
+#undef printf
+#define bb_putchar(c) my_putchar(c)
+#define putchar(c) my_putchar(c)
+#define printf(...) my_printf(__VA_ARGS__)
+#endif
 
 /* Handles %b; return 1 if output is to be short-circuited by \c */
 static int print_esc_string(const char *str)
@@ -191,6 +260,7 @@ static void print_direc(char *format, unsigned fmt_length,
 	if (have_width - 1 == have_prec)
 		have_width = NULL;
 
+	/* multiconvert sets errno = 0, but %s needs it cleared */
 	errno = 0;
 
 	switch (format[fmt_length - 1]) {
@@ -199,7 +269,7 @@ static void print_direc(char *format, unsigned fmt_length,
 		break;
 	case 'd':
 	case 'i':
-		llv = my_xstrtoll(argument);
+		llv = my_xstrtoll(skip_whitespace(argument));
  print_long:
 		if (!have_width) {
 			if (!have_prec)
@@ -217,7 +287,7 @@ static void print_direc(char *format, unsigned fmt_length,
 	case 'u':
 	case 'x':
 	case 'X':
-		llv = my_xstrtoull(argument);
+		llv = my_xstrtoull(skip_whitespace(argument));
 		/* cheat: unsigned long and long have same width, so... */
 		goto print_long;
 	case 's':
@@ -421,7 +491,7 @@ int printf_main(int argc UNUSED_PARAM, char **argv)
 		if (ENABLE_ASH_PRINTF
 		 && applet_name[0] != 'p'
 		) {
-			bb_error_msg("usage: printf FORMAT [ARGUMENT...]");
+			bb_simple_error_msg("usage: printf FORMAT [ARGUMENT...]");
 			return 2; /* bash compat */
 		}
 		bb_show_usage();
@@ -434,6 +504,9 @@ int printf_main(int argc UNUSED_PARAM, char **argv)
 	do {
 		argv = argv2;
 		argv2 = print_formatted(format, argv, &conv_err);
+#if ENABLE_PLATFORM_MINGW32
+		my_flush();
+#endif
 	} while (argv2 > argv && *argv2);
 
 	/* coreutils compat (bash doesn't do this):

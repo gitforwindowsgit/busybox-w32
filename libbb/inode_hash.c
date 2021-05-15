@@ -55,13 +55,17 @@ char* FAST_FUNC is_in_ino_dev_hashtable(const struct stat *statbuf)
 	return NULL;
 }
 
-#if !ENABLE_PLATFORM_MINGW32
 /* Add statbuf to statbuf hash table */
 void FAST_FUNC add_to_ino_dev_hashtable(const struct stat *statbuf, const char *name)
 {
 	int i;
 	ino_dev_hashtable_bucket_t *bucket;
 
+#if ENABLE_FEATURE_EXTRA_FILE_DATA
+	/* ignore invalid inode numbers */
+	if (statbuf->st_ino == 0)
+		return;
+#endif
 	if (!name)
 		name = "";
 	bucket = xmalloc(sizeof(ino_dev_hashtable_bucket_t) + strlen(name));
@@ -77,9 +81,8 @@ void FAST_FUNC add_to_ino_dev_hashtable(const struct stat *statbuf, const char *
 	bucket->next = ino_dev_hashtable[i];
 	ino_dev_hashtable[i] = bucket;
 }
-#endif
 
-#if ENABLE_DU || ENABLE_FEATURE_CLEAN_UP
+#if ENABLE_FEATURE_CLEAN_UP
 /* Clear statbuf hash table */
 void FAST_FUNC reset_ino_dev_hashtable(void)
 {

@@ -44,7 +44,7 @@
  *  Fix handling of -a to not print "unknown", add -o and -i support.
  */
 //config:config UNAME
-//config:	bool "uname (3.7 kb)"
+//config:	bool "uname (3.9 kb)"
 //config:	default y
 //config:	help
 //config:	uname is used to print system information.
@@ -59,7 +59,7 @@
 //config:
 //can't use "ARCH" for this applet, all hell breaks loose in build system :)
 //config:config BB_ARCH
-//config:	bool "arch (1.6 kb)"
+//config:	bool "arch (1.1 kb)"
 //config:	default y
 //config:	help
 //config:	Same as uname -m.
@@ -127,11 +127,9 @@ int uname_main(int argc UNUSED_PARAM, char **argv UNUSED_PARAM)
 {
 	uname_info_t uname_info;
 	IF_UNAME(const char *unknown_str = "unknown";)
-	unsigned toprint;
-
-	toprint = (1 << 4); /* "arch" = "uname -m" */
-
 #if ENABLE_UNAME
+	unsigned toprint = (1 << 4); /* "arch" = "uname -m" */
+
 	if (!ENABLE_BB_ARCH || applet_name[0] == 'u') {
 # if ENABLE_LONG_OPTS
 		static const char uname_longopts[] ALIGN1 =

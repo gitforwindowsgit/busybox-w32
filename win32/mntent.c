@@ -1,15 +1,20 @@
 /*
  * A simple WIN32 implementation of mntent routines.  It only handles
- * fixed logical drives.
+ * logical drives.
  */
 #include "libbb.h"
 
 struct mntdata {
 	DWORD flags;
 	int index;
+	struct mntent me;
+	char mnt_fsname[PATH_MAX];
+	char mnt_dir[4];
+	char mnt_type[100];
+	char mnt_opts[4];
 };
 
-FILE *setmntent(const char *file UNUSED_PARAM, const char *mode UNUSED_PARAM)
+FILE *mingw_setmntent(void)
 {
 	struct mntdata *data;
 
@@ -26,34 +31,46 @@ FILE *setmntent(const char *file UNUSED_PARAM, const char *mode UNUSED_PARAM)
 struct mntent *getmntent(FILE *stream)
 {
 	struct mntdata *data = (struct mntdata *)stream;
-	static char mnt_fsname[4];
-	static char mnt_dir[4];
-	static char mnt_type[100];
-	static char mnt_opts[4];
-	static struct mntent my_mount_entry =
-					{ mnt_fsname, mnt_dir, mnt_type, mnt_opts, 0, 0 };
 	struct mntent *entry;
+	UINT drive_type;
+	char buf[PATH_MAX];
+
+	data->me.mnt_fsname = data->mnt_fsname;
+	data->me.mnt_dir = data->mnt_dir;
+	data->me.mnt_type = data->mnt_type;
+	data->me.mnt_opts = data->mnt_opts;
+	data->me.mnt_freq = 0;
+	data->me.mnt_passno = 0;
 
 	entry = NULL;
 	while ( ++data->index < 26 ) {
 		if ( (data->flags & 1<<data->index) != 0 ) {
-			mnt_fsname[0] = 'A' + data->index;
-			mnt_fsname[1] = ':';
-			mnt_fsname[2] = '\0';
-			mnt_dir[0] = 'A' + data->index;
-			mnt_dir[1] = ':';
-			mnt_dir[2] = '\\';
-			mnt_dir[3] = '\0';
-			mnt_type[0] = '\0';
-			mnt_opts[0] = '\0';
+			data->mnt_fsname[0] = 'A' + data->index;
+			data->mnt_fsname[1] = ':';
+			data->mnt_fsname[2] = '\0';
+			data->mnt_dir[0] = 'A' + data->index;
+			data->mnt_dir[1] = ':';
+			data->mnt_dir[2] = '/';
+			data->mnt_dir[3] = '\0';
+			data->mnt_type[0] = '\0';
+			data->mnt_opts[0] = '\0';
 
-			if ( GetDriveType(mnt_dir) == DRIVE_FIXED ) {
-				if ( !GetVolumeInformation(mnt_dir, NULL, 0, NULL, NULL,
-								NULL, mnt_type, 100) ) {
-					mnt_type[0] = '\0';
+			drive_type = GetDriveType(data->mnt_dir);
+			if ( drive_type == DRIVE_FIXED || drive_type == DRIVE_CDROM ||
+						drive_type == DRIVE_REMOVABLE ||
+						drive_type == DRIVE_REMOTE ) {
+				if ( !GetVolumeInformation(data->mnt_dir, NULL, 0, NULL, NULL,
+								NULL, data->mnt_type, 100) ) {
+					continue;
 				}
 
-				entry = &my_mount_entry;
+				if (realpath(data->mnt_dir, buf) != NULL) {
+					if (isalpha(buf[0]) && strcmp(buf+1, ":/") == 0)
+						buf[2] = '\0';
+					strcpy(data->mnt_fsname, buf);
+				}
+
+				entry = &data->me;
 				break;
 			}
 		}

@@ -7,7 +7,7 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config MAKEMIME
-//config:	bool "makemime (5.9 kb)"
+//config:	bool "makemime (5.4 kb)"
 //config:	default y
 //config:	help
 //config:	Create MIME-formatted messages.
@@ -173,6 +173,7 @@ Content-Transfer-Encoding: 7bit
 int makemime_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int makemime_main(int argc UNUSED_PARAM, char **argv)
 {
+	unsigned opts;
 	llist_t *opt_headers = NULL, *l;
 	const char *opt_output;
 	const char *content_type = "application/octet-stream";
@@ -234,7 +235,7 @@ int makemime_main(int argc UNUSED_PARAM, char **argv)
 			, G.opt_charset
 			, bb_get_last_path_component_strip(*argv)
 		);
-		encode_base64(*argv++, (const char *)stdin, "");
+		printfile_base64(*argv++);
 	}
 
 	// put multipart footer

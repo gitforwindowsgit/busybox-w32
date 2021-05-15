@@ -7,7 +7,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config RMDIR
-//config:	bool "rmdir (3.4 kb)"
+//config:	bool "rmdir (3.5 kb)"
 //config:	default y
 //config:	help
 //config:	rmdir is used to remove empty directories.
@@ -20,7 +20,7 @@
 /* http://www.opengroup.org/onlinepubs/007904975/utilities/rmdir.html */
 
 //usage:#define rmdir_trivial_usage
-//usage:       "[OPTIONS] DIRECTORY..."
+//usage:       "[-p] DIRECTORY..."
 //usage:#define rmdir_full_usage "\n\n"
 //usage:       "Remove DIRECTORY if it is empty\n"
 //usage:     "\n	-p	Include parents"

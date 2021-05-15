@@ -1,5 +1,5 @@
 VERSION = 1
-PATCHLEVEL = 28
+PATCHLEVEL = 34
 SUBLEVEL = 0
 EXTRAVERSION = .git
 NAME = Unnamed
@@ -297,6 +297,7 @@ NM		= $(CROSS_COMPILE)nm
 STRIP		= $(CROSS_COMPILE)strip
 OBJCOPY		= $(CROSS_COMPILE)objcopy
 OBJDUMP		= $(CROSS_COMPILE)objdump
+WINDRES		= $(CROSS_COMPILE)windres
 PKG_CONFIG	?= $(CROSS_COMPILE)pkg-config
 AWK		= awk
 GENKSYMS	= scripts/genksyms/genksyms
@@ -304,6 +305,15 @@ DEPMOD		= /sbin/depmod
 KALLSYMS	= scripts/kallsyms
 PERL		= perl
 CHECK		= sparse
+
+# Handle MSYS2 weirdness
+ifneq ($(CROSS_COMPILE),)
+ifeq ($(shell command -v $(AR)),)
+AR := $(CROSS_COMPILE)gcc-ar
+STRIP := strip
+WINDRES := windres
+endif
+endif
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ -Wbitwise $(CF)
 MODFLAGS	= -DMODULE
@@ -331,7 +341,7 @@ KERNELVERSION = $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION)
 
 export	VERSION PATCHLEVEL SUBLEVEL KERNELRELEASE KERNELVERSION \
 	ARCH CONFIG_SHELL HOSTCC HOSTCFLAGS CROSS_COMPILE AS LD CC \
-	CPP AR NM STRIP OBJCOPY OBJDUMP MAKE AWK GENKSYMS PERL UTS_MACHINE \
+	CPP AR NM STRIP OBJCOPY OBJDUMP WINDRES MAKE AWK GENKSYMS PERL UTS_MACHINE \
 	HOSTCXX HOSTCXXFLAGS LDFLAGS_MODULE CHECK CHECKFLAGS
 
 export CPPFLAGS NOSTDINC_FLAGS LINUXINCLUDE OBJCOPYFLAGS LDFLAGS
@@ -362,14 +372,14 @@ scripts/basic/%: scripts_basic ;
 
 # This target generates Kbuild's and Config.in's from *.c files
 PHONY += gen_build_files
-gen_build_files: $(wildcard $(srctree)/*/*.c) $(wildcard $(srctree)/*/*/*.c)
+gen_build_files: $(wildcard $(srctree)/*/*.c) $(wildcard $(srctree)/*/*/*.c) $(wildcard $(srctree)/embed/*)
 	$(Q)$(srctree)/scripts/gen_build_files.sh $(srctree) $(objtree)
 
 # bbox: we have helpers in applets/
 # we depend on scripts_basic, since scripts/basic/fixdep
 # must be built before any other host prog
 PHONY += applets_dir
-applets_dir: scripts_basic gen_build_files
+applets_dir: scripts_basic gen_build_files include/config/MARKER
 	$(Q)$(MAKE) $(build)=applets
 
 applets/%: applets_dir ;
@@ -463,6 +473,7 @@ scripts_basic: include/autoconf.h
 # Objects we will link into busybox / subdirs we need to visit
 core-y		:= \
 		applets/ \
+		win32/resources/ \
 
 libs-y		:= \
 		archival/ \
@@ -614,6 +625,7 @@ quiet_cmd_busybox__ ?= LINK    $@
       "$(core-y)" \
       "$(libs-y)" \
       "$(LDLIBS)" \
+      "$(CONFIG_EXTRA_LDLIBS)" \
       && $(srctree)/scripts/generate_BUFSIZ.sh --post include/common_bufsiz.h
 
 # Generate System.map
@@ -852,11 +864,14 @@ quiet_cmd_gen_common_bufsiz = GEN     include/common_bufsiz.h
       cmd_gen_common_bufsiz = $(srctree)/scripts/generate_BUFSIZ.sh include/common_bufsiz.h
 quiet_cmd_split_autoconf   = SPLIT   include/autoconf.h -> include/config/*
       cmd_split_autoconf   = scripts/basic/split-include include/autoconf.h include/config
+quiet_cmd_gen_embedded_scripts = GEN     include/embedded_scripts.h
+      cmd_gen_embedded_scripts = $(srctree)/scripts/embedded_scripts include/embedded_scripts.h $(srctree)/embed $(srctree)/applets_sh
 #bbox# piggybacked generation of few .h files
-include/config/MARKER: scripts/basic/split-include include/autoconf.h
+include/config/MARKER: scripts/basic/split-include include/autoconf.h $(wildcard $(srctree)/embed/*) $(wildcard $(srctree)/applets_sh/*) $(srctree)/scripts/embedded_scripts
 	$(call cmd,split_autoconf)
 	$(call cmd,gen_bbconfigopts)
 	$(call cmd,gen_common_bufsiz)
+	$(call cmd,gen_embedded_scripts)
 	@touch $@
 
 # Generate some files
@@ -976,11 +991,13 @@ MRPROPER_FILES += .config .config.old include/asm .version .old_version \
 		  include/autoconf.h \
 		  include/bbconfigopts.h \
 		  include/bbconfigopts_bz2.h \
+		  include/embedded_scripts.h \
 		  include/usage_compressed.h \
 		  include/applet_tables.h \
 		  include/applets.h \
 		  include/usage.h \
 		  applets/usage \
+		  win32/resources/busybox-w32.manifest \
 		  .kernelrelease Module.symvers tags TAGS cscope* \
 		  busybox_old
 

@@ -25,6 +25,11 @@
  *
  * FEATURE_INSTALLER or FEATURE_SUID will still link printf routines in. :(
  */
+
+/* Define this accessor before we #define "errno" our way */
+#include <errno.h>
+static inline int *get_perrno(void) { return &errno; }
+
 #include "busybox.h"
 
 #if !(defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) \
@@ -48,8 +53,28 @@
 # define IF_FEATURE_INDIVIDUAL(...) __VA_ARGS__
 #endif
 
+#if (ENABLE_FEATURE_INSTALLER && !ENABLE_PLATFORM_MINGW32) || \
+	(ENABLE_PLATFORM_MINGW32 && (ENABLE_FEATURE_PREFER_APPLETS \
+		|| ENABLE_FEATURE_SH_STANDALONE \
+		|| ENABLE_FEATURE_SH_NOFORK))
+# define IF_FULL_LIST_OPTION(...) __VA_ARGS__
+#else
+# define IF_FULL_LIST_OPTION(...)
+#endif
+
 #include "usage_compressed.h"
 
+#if ENABLE_FEATURE_SH_EMBEDDED_SCRIPTS
+# define DEFINE_SCRIPT_DATA 1
+# include "embedded_scripts.h"
+#else
+# define NUM_SCRIPTS 0
+#endif
+#if NUM_SCRIPTS > 0
+# define BB_ARCHIVE_PUBLIC
+# include "bb_archive.h"
+static const char packed_scripts[] ALIGN1 = { PACKED_SCRIPTS };
+#endif
 
 /* "Do not compress usage text if uncompressed text is small
  *  and we don't include bunzip2 code for other reasons"
@@ -96,29 +121,10 @@ static const char usage_messages[] ALIGN1 = UNPACKED_USAGE;
 #if ENABLE_FEATURE_COMPRESS_USAGE
 
 static const char packed_usage[] ALIGN1 = { PACKED_USAGE };
-#define BB_ARCHIVE_PUBLIC
+# define BB_ARCHIVE_PUBLIC
 # include "bb_archive.h"
-static const char *unpack_usage_messages(void)
-{
-	char *outbuf = NULL;
-	bunzip_data *bd;
-	int i;
-
-	i = start_bunzip(&bd,
-			/* src_fd: */ -1,
-			/* inbuf:  */ packed_usage,
-			/* len:    */ sizeof(packed_usage));
-	/* read_bunzip can longjmp to start_bunzip, and ultimately
-	 * end up here with i != 0 on read data errors! Not trivial */
-	if (!i) {
-		/* Cannot use xmalloc: will leak bd in NOFORK case! */
-		outbuf = malloc_or_warn(sizeof(UNPACKED_USAGE));
-		if (outbuf)
-			read_bunzip(bd, outbuf, sizeof(UNPACKED_USAGE));
-	}
-	dealloc_bunzip(bd);
-	return outbuf;
-}
+# define unpack_usage_messages() \
+	unpack_bz2_data(packed_usage, sizeof(packed_usage), sizeof(UNPACKED_USAGE))
 # define dealloc_usage_messages(s) free(s)
 
 #else
@@ -133,38 +139,47 @@ void FAST_FUNC bb_show_usage(void)
 {
 	if (ENABLE_SHOW_USAGE) {
 #ifdef SINGLE_APPLET_STR
-		/* Imagine that this applet is "true". Dont suck in printf! */
+		/* Imagine that this applet is "true". Dont link in printf! */
 		const char *usage_string = unpack_usage_messages();
 
-		if (*usage_string == '\b') {
-			full_write2_str("No help available.\n\n");
-		} else {
-			full_write2_str("Usage: "SINGLE_APPLET_STR" ");
-			full_write2_str(usage_string);
-			full_write2_str("\n\n");
+		if (usage_string) {
+			if (*usage_string == '\b') {
+				full_write2_str("No help available\n");
+			} else {
+				full_write2_str("Usage: "SINGLE_APPLET_STR" ");
+				full_write2_str(usage_string);
+				full_write2_str("\n");
+			}
+			if (ENABLE_FEATURE_CLEAN_UP)
+				dealloc_usage_messages((char*)usage_string);
 		}
-		if (ENABLE_FEATURE_CLEAN_UP)
-			dealloc_usage_messages((char*)usage_string);
 #else
 		const char *p;
 		const char *usage_string = p = unpack_usage_messages();
 		int ap = find_applet_by_name(applet_name);
 
-		if (ap < 0) /* never happens, paranoia */
+		if (ap < 0 || usage_string == NULL)
 			xfunc_die();
 		while (ap) {
 			while (*p++) continue;
 			ap--;
 		}
 		full_write2_str(bb_banner);
-		full_write2_str(" multi-call binary\n");
+#if ENABLE_PLATFORM_MINGW32
+		full_write2_str("\n");
+#else
+		full_write2_str(" multi-call binary.\n"); /* common string */
+#endif
 		if (*p == '\b')
-			full_write2_str("\nNo help available.\n\n");
+			full_write2_str("\nNo help available\n");
 		else {
 			full_write2_str("\nUsage: ");
 			full_write2_str(applet_name);
-			full_write2_str(" ");
-			full_write2_str(p);
+			if (p[0]) {
+				if (p[0] != '\n')
+					full_write2_str(" ");
+				full_write2_str(p);
+			}
 			full_write2_str("\n");
 		}
 		if (ENABLE_FEATURE_CLEAN_UP)
@@ -176,7 +191,7 @@ void FAST_FUNC bb_show_usage(void)
 
 int FAST_FUNC find_applet_by_name(const char *name)
 {
-	unsigned i, max;
+	unsigned i;
 	int j;
 	const char *p;
 
@@ -200,105 +215,43 @@ int FAST_FUNC find_applet_by_name(const char *name)
 #endif
 
 	p = applet_names;
-	i = 0;
 #if KNOWN_APPNAME_OFFSETS <= 0
-	max = NUM_APPLETS;
+	i = 0;
 #else
-	max = NUM_APPLETS * KNOWN_APPNAME_OFFSETS;
+	i = NUM_APPLETS * (KNOWN_APPNAME_OFFSETS - 1);
 	for (j = ARRAY_SIZE(applet_nameofs)-1; j >= 0; j--) {
 		const char *pp = applet_names + applet_nameofs[j];
 		if (strcmp(name, pp) >= 0) {
 			//bb_error_msg("name:'%s' >= pp:'%s'", name, pp);
 			p = pp;
-			i = max - NUM_APPLETS;
 			break;
 		}
-		max -= NUM_APPLETS;
+		i -= NUM_APPLETS;
 	}
-	max /= (unsigned)KNOWN_APPNAME_OFFSETS;
 	i /= (unsigned)KNOWN_APPNAME_OFFSETS;
-	//bb_error_msg("name:'%s' starting from:'%s' i:%u max:%u", name, p, i, max);
+	//bb_error_msg("name:'%s' starting from:'%s' i:%u", name, p, i);
 #endif
 
 	/* Open-coded linear search without strcmp/strlen calls for speed */
-
-#if 0 /*BB_UNALIGNED_MEMACCESS_OK && BB_LITTLE_ENDIAN*/
-	/* skip "[\0" name, it's surely not it */
-	if (ENABLE_TEST && LONE_CHAR(p, '['))
-		i++, p += 2;
-	/* All remaining applet names in p[] are at least 2 chars long */
-	/* name[] is also at least 2 chars long */
-
-	n32 = (name[0] << 0) | (name[1] << 8) | (name[2] << 16);
-	while (i < max) {
-		uint32_t p32;
-		char ch;
-
-		/* Quickly check match of the first 3 bytes */
-		move_from_unaligned32(p32, p);
-		p += 3;
-		if ((p32 & 0x00ffffff) != n32) {
-			/* Most likely case: 3 first bytes do not match */
-			i++;
-			if ((p32 & 0x00ff0000) == '\0')
-				continue; // p[2] was NUL
-			p++;
-			if ((p32 & 0xff000000) == '\0')
-				continue; // p[3] was NUL
-			/* p[0..3] aren't matching and none is NUL, check the rest */
-			while (*p++ != '\0')
-				continue;
-			continue;
-		}
-
-		/* Unlikely branch: first 3 bytes ([0..2]) match */
-		if ((p32 & 0x00ff0000) == '\0') {
-			/* name is 2-byte long, it is full match */
-			//bb_error_msg("found:'%s' i:%u", name, i);
-			return i;
-		}
-		/* Check remaining bytes [3..NUL] */
-		ch = (p32 >> 24);
-		j = 3;
-		while (ch == name[j]) {
-			if (ch == '\0') {
-				//bb_error_msg("found:'%s' i:%u", name, i);
-				return i;
-			}
-			ch = *++p;
-			j++;
-		}
-		/* Not a match. Skip it, including NUL */
-		while (ch != '\0')
-			ch = *++p;
-		p++;
-		i++;
-	}
-	return -1;
-#else
-	while (i < max) {
-		char ch;
-		j = 0;
-		/* Do we see "name\0" in applet_names[p] position? */
-		while ((ch = *p) == name[j]) {
-			if (ch == '\0') {
+	while (*p) {
+		/* Do we see "name\0" at current position in applet_names? */
+		for (j = 0; *p == name[j]; ++j) {
+			if (*p++ == '\0') {
 				//bb_error_msg("found:'%s' i:%u", name, i);
 				return i; /* yes */
 			}
-			p++;
-			j++;
 		}
-		/* No.
-		 * p => 1st non-matching char in applet_names[],
-		 * skip to and including NUL.
-		 */
-		while (ch != '\0')
-			ch = *++p;
-		p++;
+		/* No. Have we gone too far, alphabetically? */
+		if (*p > name[j]) {
+			//bb_error_msg("break:'%s' i:%u", name, i);
+			break;
+		}
+		/* No. Move to the start of the next applet name. */
+		while (*p++ != '\0')
+			continue;
 		i++;
 	}
 	return -1;
-#endif
 }
 
 
@@ -308,18 +261,14 @@ void lbb_prepare(const char *applet
 void lbb_prepare(const char *applet
 		IF_FEATURE_INDIVIDUAL(, char **argv))
 {
-#ifdef __GLIBC__
-	(*(int **)&bb_errno) = __errno_location();
+#ifdef bb_cached_errno_ptr
+	(*(int **)not_const_pp(&bb_errno)) = get_perrno();
 	barrier();
 #endif
 	applet_name = applet;
 
 	if (ENABLE_LOCALE_SUPPORT)
 		setlocale(LC_ALL, "");
-
-#if ENABLE_PLATFORM_MINGW32
-	init_winsock();
-#endif
 
 #if ENABLE_FEATURE_INDIVIDUAL
 	/* Redundant for busybox (run_applet_and_exit covers that case)
@@ -640,7 +589,7 @@ static void check_suid(int applet_no)
 			/* same group / in group */
 			m >>= 3;
 		if (!(m & S_IXOTH)) /* is x bit not set? */
-			bb_error_msg_and_die("you have no permission to run this applet");
+			bb_simple_error_msg_and_die("you have no permission to run this applet");
 
 		/* We set effective AND saved ids. If saved-id is not set
 		 * like we do below, seteuid(0) can still later succeed! */
@@ -652,7 +601,7 @@ static void check_suid(int applet_no)
 			rgid = sct->m_ugid.gid;
 		/* else: we will set egid = rgid, thus dropping sgid effect */
 		if (setresgid(-1, rgid, rgid))
-			bb_perror_msg_and_die("setresgid");
+			bb_simple_perror_msg_and_die("setresgid");
 
 		/* Are we directed to change uid
 		 * (APPLET = s** USER.GROUP or APPLET = S** USER.GROUP)?
@@ -662,7 +611,7 @@ static void check_suid(int applet_no)
 			uid = sct->m_ugid.uid;
 		/* else: we will set euid = ruid, thus dropping suid effect */
 		if (setresuid(-1, uid, uid))
-			bb_perror_msg_and_die("setresuid");
+			bb_simple_perror_msg_and_die("setresuid");
 
 		goto ret;
 	}
@@ -672,7 +621,7 @@ static void check_suid(int applet_no)
 
 		if (!onetime) {
 			onetime = 1;
-			bb_error_msg("using fallback suid method");
+			bb_simple_error_msg("using fallback suid method");
 		}
 	}
 #   endif
@@ -682,7 +631,7 @@ static void check_suid(int applet_no)
 		/* Real uid is not 0. If euid isn't 0 too, suid bit
 		 * is most probably not set on our executable */
 		if (geteuid())
-			bb_error_msg_and_die("must be suid to work properly");
+			bb_simple_error_msg_and_die("must be suid to work properly");
 	} else if (APPLET_SUID(applet_no) == BB_SUID_DROP) {
 		/*
 		 * Drop all privileges.
@@ -711,7 +660,6 @@ static void check_suid(int applet_no)
 
 
 # if ENABLE_FEATURE_INSTALLER
-#  if !ENABLE_PLATFORM_MINGW32
 static const char usr_bin [] ALIGN1 = "/usr/bin/";
 static const char usr_sbin[] ALIGN1 = "/usr/sbin/";
 static const char *const install_dir[] = {
@@ -733,18 +681,39 @@ static void install_links(const char *busybox, int use_symbolic_links,
 	 * busybox.h::bb_install_loc_t, or else... */
 	int (*lf)(const char *, const char *);
 	char *fpc;
-        const char *appname = applet_names;
+	const char *appname = applet_names;
 	unsigned i;
 	int rc;
+#  if ENABLE_PLATFORM_MINGW32
+	const char *sd = NULL;
+
+	if (custom_install_dir != NULL) {
+		bb_make_directory(custom_install_dir, 0755, FILEUTILS_RECUR);
+	}
+	else {
+		sd = get_system_drive();
+		for (i=1; i<ARRAY_SIZE(install_dir); ++i) {
+			fpc = xasprintf("%s%s", sd ?: "", install_dir[i]);
+			bb_make_directory(fpc, 0755, FILEUTILS_RECUR);
+			free(fpc);
+		}
+	}
+#  endif
 
 	lf = link;
 	if (use_symbolic_links)
 		lf = symlink;
 
 	for (i = 0; i < ARRAY_SIZE(applet_main); i++) {
+#  if ENABLE_PLATFORM_MINGW32
+		fpc = xasprintf("%s%s/%s.exe", sd ?: "",
+				custom_install_dir ?: install_dir[APPLET_INSTALL_LOC(i)],
+				appname);
+#  else
 		fpc = concat_path_file(
 				custom_install_dir ? custom_install_dir : install_dir[APPLET_INSTALL_LOC(i)],
 				appname);
+#  endif
 		// debug: bb_error_msg("%slinking %s to busybox",
 		//		use_symbolic_links ? "sym" : "", fpc);
 		rc = lf(busybox, fpc);
@@ -756,29 +725,6 @@ static void install_links(const char *busybox, int use_symbolic_links,
 			continue;
 	}
 }
-#  else /* ENABLE_PLATFORM_MINGW32 */
-static void install_links(const char *busybox,
-		int use_symbolic_links UNUSED_PARAM, char *custom_install_dir)
-{
-	char *fpc;
-	const char *appname = applet_names;
-	int rc;
-
-	if (!is_directory(custom_install_dir, FALSE))
-		bb_error_msg_and_die("'%s' is not a directory", custom_install_dir);
-
-	while (*appname) {
-		fpc = xasprintf("%s/%s.exe", custom_install_dir, appname);
-		rc = link(busybox, fpc);
-		if (rc != 0 && errno != EEXIST) {
-			bb_simple_perror_msg(fpc);
-		}
-		free(fpc);
-		while (*appname++ != '\0')
-			continue;
-	}
-}
-#  endif
 # elif ENABLE_BUSYBOX
 static void install_links(const char *busybox UNUSED_PARAM,
 		int use_symbolic_links UNUSED_PARAM,
@@ -787,7 +733,54 @@ static void install_links(const char *busybox UNUSED_PARAM,
 }
 # endif
 
+# if ENABLE_BUSYBOX || NUM_APPLETS > 0
 static void run_applet_and_exit(const char *name, char **argv) NORETURN;
+#endif
+
+# if NUM_SCRIPTS > 0
+static int find_script_by_name(const char *name)
+{
+	int i;
+	int applet = find_applet_by_name(name);
+
+	if (applet >= 0) {
+		for (i = 0; i < NUM_SCRIPTS; ++i)
+			if (applet_numbers[i] == applet)
+				return i;
+	}
+	return -1;
+}
+
+int scripted_main(int argc UNUSED_PARAM, char **argv) MAIN_EXTERNALLY_VISIBLE;
+int scripted_main(int argc UNUSED_PARAM, char **argv)
+{
+	int script = find_script_by_name(applet_name);
+	if (script >= 0)
+#  if ENABLE_SHELL_ASH
+		exit(ash_main(-script - 1, argv));
+#  elif ENABLE_SHELL_HUSH
+		exit(hush_main(-script - 1, argv));
+#  else
+		return 1;
+#  endif
+	return 0;
+}
+
+char* FAST_FUNC
+get_script_content(unsigned n)
+{
+	char *t = unpack_bz2_data(packed_scripts, sizeof(packed_scripts),
+					UNPACKED_SCRIPTS_LENGTH);
+	if (t) {
+		while (n != 0) {
+			while (*t++ != '\0')
+				continue;
+			n--;
+		}
+	}
+	return t;
+}
+# endif /* NUM_SCRIPTS > 0 */
 
 # if ENABLE_BUSYBOX
 #  if ENABLE_FEATURE_SH_STANDALONE && ENABLE_FEATURE_TAB_COMPLETION
@@ -818,26 +811,34 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 
 		dup2(1, 2);
 		full_write2_str(bb_banner); /* reuse const string */
-		full_write2_str(" multi-call binary\n"); /* reuse */
+#if ENABLE_PLATFORM_MINGW32
+		full_write2_str("\n");
+#else
+		full_write2_str(" multi-call binary.\n"); /* reuse */
+#endif
 #if defined(MINGW_VER)
-		if (strlen(MINGW_VER)) {
+		if (sizeof(MINGW_VER) > 5) {
 			full_write2_str(MINGW_VER "\n\n");
 		}
 #endif
 		full_write2_str(
-			"BusyBox is copyrighted by many authors between 1998-2015.\n"
+			"BusyBox is copyrighted by many authors between 1998-2021.\n"
 			"Licensed under GPLv2. See source distribution for detailed\n"
 			"copyright notices.\n"
 			"\n"
 			"Usage: busybox [function [arguments]...]\n"
+			"   or: busybox --list"IF_FULL_LIST_OPTION("[-full]")"\n"
+#  if ENABLE_FEATURE_SHOW_SCRIPT && NUM_SCRIPTS > 0
+			"   or: busybox --show SCRIPT\n"
+#  endif
+			IF_FEATURE_INSTALLER(
 			IF_NOT_PLATFORM_MINGW32(
-			"   or: busybox --list"IF_FEATURE_INSTALLER("[-full]")"\n"
+			"   or: busybox --install [-s] [DIR]\n"
 			)
 			IF_PLATFORM_MINGW32(
-			"   or: busybox --list\n"
+			"   or: busybox --install [-s] [-u|DIR]\n"
+			"   or: busybox --uninstall [-n] file\n"
 			)
-			IF_FEATURE_INSTALLER(
-			"   or: busybox --install "IF_NOT_PLATFORM_MINGW32("[-s] ")"[DIR]\n"
 			)
 			"   or: function [arguments]...\n"
 			"\n"
@@ -855,17 +856,12 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 			"\tTo run external program, use full path (/sbin/ip instead of ip).\n"
 			)
 			"\n"
-#if ENABLE_GLOBBING
-			"\tSupport for native Windows wildcards is enabled.  In some\n"
-			"\tcases this may result in wildcards being processed twice.\n"
-			"\n"
-#endif
 			"Currently defined functions:\n"
 		);
 		col = 0;
-		a = applet_names;
 		/* prevent last comma to be in the very last pos */
 		output_width--;
+		a = applet_names;
 		while (*a) {
 			int len2 = strlen(a) + 2;
 			if (col >= (int)output_width - len2) {
@@ -886,6 +882,19 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 		return 0;
 	}
 
+#  if ENABLE_FEATURE_SHOW_SCRIPT && NUM_SCRIPTS > 0
+	if (strcmp(argv[1], "--show") == 0) {
+		int n;
+		if (!argv[2])
+			bb_error_msg_and_die(bb_msg_requires_arg, "--show");
+		n = find_script_by_name(argv[2]);
+		if (n < 0)
+			bb_error_msg_and_die("script '%s' not found", argv[2]);
+		full_write1_str(get_script_content(n));
+		return 0;
+	}
+#  endif
+
 	if (is_prefixed_with(argv[1], "--list")) {
 		unsigned i = 0;
 		const char *a = applet_names;
@@ -894,6 +903,25 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 #  if ENABLE_FEATURE_INSTALLER && !ENABLE_PLATFORM_MINGW32
 			if (argv[1][6]) /* --list-full? */
 				full_write2_str(install_dir[APPLET_INSTALL_LOC(i)] + 1);
+#  elif ENABLE_PLATFORM_MINGW32 && (ENABLE_FEATURE_PREFER_APPLETS \
+		|| ENABLE_FEATURE_SH_STANDALONE \
+		|| ENABLE_FEATURE_SH_NOFORK)
+			if (argv[1][6]) { /* --list-full? */
+				const char *str;
+
+				if (APPLET_IS_NOFORK(i))
+					str = "NOFORK  ";
+				else if (APPLET_IS_NOEXEC(i))
+					str = "noexec  ";
+#   if NUM_SCRIPTS > 0
+				else if (applet_main[i] == scripted_main)
+					str = "script  ";
+#   endif
+				else
+					str = "        ";
+				full_write2_str(str);
+				full_write2_str(install_dir[APPLET_INSTALL_LOC(i)] + 1);
+			}
 #  endif
 			full_write2_str(a);
 			full_write2_str("\n");
@@ -905,8 +933,8 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 	}
 
 	if (ENABLE_FEATURE_INSTALLER && strcmp(argv[1], "--install") == 0) {
-#if !ENABLE_PLATFORM_MINGW32
 		int use_symbolic_links;
+#if !ENABLE_PLATFORM_MINGW32
 		const char *busybox;
 
 		busybox = xmalloc_readlink(bb_busybox_exec_path);
@@ -927,15 +955,61 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 		use_symbolic_links = (argv[2] && strcmp(argv[2], "-s") == 0 && ++argv);
 		install_links(busybox, use_symbolic_links, argv[2]);
 #else
-		/* busybox --install [DIR]
-		 * where DIR is the directory to install to.  If DIR is not
-		 * provided put the links in the same directory as busybox.
+		char *target;
+		uint32_t opt;
+		enum { OPT_s = (1 << 0), OPT_u = (1 << 1) };
+
+		/* busybox --install [-s] [-u|DIR]
+		 * -s: make symlinks
+		 * -u: install to Unix-style directories in system drive
+		 * DIR: directory to install links to
+		 * If no argument is provided put the links in the same directory
+		 * as busybox.
 		 */
-		install_links(bb_busybox_exec_path, FALSE, argv[2] ? argv[2] :
-				dirname(xstrdup(bb_busybox_exec_path)));
+		argv += 1;
+		opt = getopt32(argv, "!su");
+		argv += optind;
+
+		if (opt == (uint32_t)-1 ||
+				(*argv != NULL && (opt & OPT_u || *(argv + 1) != NULL)))
+			bb_simple_error_msg_and_die("busybox --install [-s] [-u|DIR]");
+
+		if (opt & OPT_u)
+			target = NULL;
+		else if (*argv != NULL)
+			target = *argv;
+		else
+			target = dirname(xstrdup(bb_busybox_exec_path));
+
+		use_symbolic_links = opt & OPT_s;
+		/* NULL target -> install to Unix-style dirs */
+		install_links(bb_busybox_exec_path, use_symbolic_links, target);
 #endif
 		return 0;
 	}
+
+#if ENABLE_PLATFORM_MINGW32 && ENABLE_FEATURE_INSTALLER
+	if (strcmp(argv[1], "--uninstall") == 0) {
+		char name[PATH_MAX];
+		int dry_run = (argv[2] && strcmp(argv[2], "-n") == 0 && ++argv);
+		const char *file = argv[2];
+
+		if (!argv[2])
+			bb_error_msg_and_die(bb_msg_requires_arg, "--uninstall");
+
+		while (enumerate_links(file, name)) {
+			if (dry_run) {
+				full_write1_str(name);
+				full_write1_str("\n");
+			}
+			else if (unlink(name) != 0) {
+				bb_simple_perror_msg(name);
+			}
+			file = NULL;
+		}
+		return 0;
+	}
+#endif
 
 	if (strcmp(argv[1], "--help") == 0) {
 		/* "busybox --help [<applet>]" */
@@ -956,16 +1030,8 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 # endif
 
 # if NUM_APPLETS > 0
-void FAST_FUNC run_applet_no_and_exit(int applet_no, const char *name, char **argv)
+void FAST_FUNC show_usage_if_dash_dash_help(int applet_no, char **argv)
 {
-	int argc = string_array_len(argv);
-
-	/*
-	 * We do not use argv[0]: do not want to repeat massaging of
-	 * "-/sbin/halt" -> "halt", for example.
-	 */
-	applet_name = name;
-
 	/* Special case. POSIX says "test --help"
 	 * should be no different from e.g. "test --foo".
 	 * Thus for "test", we skip --help check.
@@ -981,16 +1047,65 @@ void FAST_FUNC run_applet_no_and_exit(int applet_no, const char *name, char **ar
 #  if defined APPLET_NO_false
 	 && applet_no != APPLET_NO_false
 #  endif
+#  if defined APPLET_NO_busybox
+	 && applet_no != APPLET_NO_busybox
+#  endif
 	) {
-		if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+		if (argv[1] && !argv[2] && strcmp(argv[1], "--help") == 0) {
 			/* Make "foo --help" exit with 0: */
 			xfunc_error_retval = 0;
 			bb_show_usage();
 		}
 	}
+}
+
+#  if ENABLE_PLATFORM_MINGW32
+static int interp = 0;
+char bb_comm[COMM_LEN];
+char bb_command_line[128];
+#  endif
+
+void FAST_FUNC run_applet_no_and_exit(int applet_no, const char *name, char **argv)
+{
+#  if ENABLE_PLATFORM_MINGW32
+	int argc = string_array_len(argv);
+	int i;
+	const char *vmask;
+	unsigned int mask;
+#  else
+	int argc;
+#  endif
+
+	/*
+	 * We do not use argv[0]: do not want to repeat massaging of
+	 * "-/sbin/halt" -> "halt", for example.
+	 */
+	applet_name = name;
+
+	show_usage_if_dash_dash_help(applet_no, argv);
+
 	if (ENABLE_FEATURE_SUID)
 		check_suid(applet_no);
+
+#  if ENABLE_PLATFORM_MINGW32
+	safe_strncpy(bb_comm,
+					interp ? bb_basename(argv[interp]) : applet_name,
+					sizeof(bb_comm));
+
+	safe_strncpy(bb_command_line, applet_name, sizeof(bb_command_line));
+	for (i=1; i < argc && argv[i] &&
+			strlen(bb_command_line) + strlen(argv[i]) + 2 < 128; ++i) {
+		strcat(strcat(bb_command_line, " "), argv[i]);
+	}
+
+	vmask = getenv("BB_UMASK");
+	if (vmask && sscanf(vmask, "%o", &mask) == 1)
+		umask((mode_t)(mask&0777));
+#  else
+	argc = string_array_len(argv);
+#  endif
 	xfunc_error_retval = applet_main[applet_no](argc, argv);
+
 	/* Note: applet_main() may also not return (die on a xfunc or such) */
 	xfunc_die();
 }
@@ -1020,7 +1135,33 @@ static NORETURN void run_applet_and_exit(const char *name, char **argv)
 }
 # endif
 
-#endif /* !defined(SINGLE_APPLET_MAIN) */
+#else /* defined(SINGLE_APPLET_MAIN) */
+
+# if NUM_SCRIPTS > 0
+/* if SINGLE_APPLET_MAIN, these two functions are simpler: */
+int scripted_main(int argc UNUSED_PARAM, char **argv) MAIN_EXTERNALLY_VISIBLE;
+int scripted_main(int argc UNUSED_PARAM, char **argv)
+{
+#  if ENABLE_SHELL_ASH
+	int script = 0;
+	exit(ash_main(-script - 1, argv));
+#  elif ENABLE_SHELL_HUSH
+	int script = 0;
+	exit(hush_main(-script - 1, argv));
+#  else
+	return 1;
+#  endif
+}
+char* FAST_FUNC
+get_script_content(unsigned n UNUSED_PARAM)
+{
+	char *t = unpack_bz2_data(packed_scripts, sizeof(packed_scripts),
+					UNPACKED_SCRIPTS_LENGTH);
+	return t;
+}
+# endif /* NUM_SCRIPTS > 0 */
+
+#endif /* defined(SINGLE_APPLET_MAIN) */
 
 #if ENABLE_BUILD_LIBBUSYBOX
 int lbb_main(char **argv)
@@ -1028,6 +1169,9 @@ int lbb_main(char **argv)
 int main(int argc UNUSED_PARAM, char **argv)
 #endif
 {
+#if ENABLE_PLATFORM_MINGW32
+	char *s;
+#endif
 #if 0
 	/* TODO: find a use for a block of memory between end of .bss
 	 * and end of page. For example, I'm getting "_end:0x812e698 2408 bytes"
@@ -1074,6 +1218,26 @@ int main(int argc UNUSED_PARAM, char **argv)
 		re_execed = 1;
 		argv[0][0] &= 0x7f;
 	}
+#endif
+#if ENABLE_PLATFORM_MINGW32
+	/* detect if we're running an interpreted script */
+	if (argv[0][1] == ':' && argv[0][2] == '/') {
+		switch (argv[0][0]) {
+		case '2':
+			++interp;
+			/* fall through */
+		case '1':
+			++interp;
+			argv[0] += 3;
+			break;
+		}
+	}
+# if ENABLE_FEATURE_EURO
+	init_codepage();
+# endif
+	/* Ignore critical errors, such as calling GetVolumeInformation() on
+	 * a floppy or CDROM drive with no media. */
+	SetErrorMode(SEM_FAILCRITICALERRORS);
 #endif
 
 #if defined(__MINGW64_VERSION_MAJOR)
@@ -1159,6 +1323,10 @@ int main(int argc UNUSED_PARAM, char **argv)
 
 #else
 
+# if ENABLE_PLATFORM_MINGW32
+	if (argv[1] && argv[2] && strcmp(argv[1], "--busybox") == 0)
+		argv += 2;
+# endif
 	lbb_prepare("busybox" IF_FEATURE_INDIVIDUAL(, argv));
 # if !ENABLE_BUSYBOX
 	if (argv[1] && is_prefixed_with(bb_basename(argv[0]), "busybox"))
@@ -1167,24 +1335,12 @@ int main(int argc UNUSED_PARAM, char **argv)
 	applet_name = argv[0];
 	if (applet_name[0] == '-')
 		applet_name++;
-	if (ENABLE_PLATFORM_MINGW32) {
-		if ( argv[1] && argv[2] && strcmp(argv[1], "--busybox") == 0 ) {
-			argv += 2;
-			applet_name = argv[0];
-		}
-		else {
-			char *s = argv[0];
-			int i, len = strlen(s);
-
-			for ( i=0; i < len; ++i ) {
-				s[i] = tolower(s[i]);
-			}
-			if (len > 4 && !strcmp(s+len-4, ".exe")) {
-				len -= 4;
-				s[len] = '\0';
-			}
-		}
-	}
+# if ENABLE_PLATFORM_MINGW32
+	str_tolower(argv[0]);
+	bs_to_slash(argv[0]);
+	if (has_exe_suffix_or_dot(argv[0]) && (s=strrchr(argv[0], '.')))
+		*s = '\0';
+# endif
 	applet_name = bb_basename(applet_name);
 
 	/* If we are a result of execv("/proc/self/exe"), fix ugly comm of "exe" */

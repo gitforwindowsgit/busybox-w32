@@ -2,15 +2,6 @@
 # Build system
 # ==========================================================================
 
-ifeq ($(AR),x86_64-w64-mingw32-ar)
-AR := x86_64-w64-mingw32-gcc-ar
-STRIP := strip
-endif
-ifeq ($(AR),i686-w64-mingw32-ar)
-AR := i686-w64-mingw32-gcc-ar
-STRIP := strip
-endif
-
 busybox.links: $(srctree)/applets/busybox.mkll $(objtree)/include/autoconf.h include/applets.h
 	$(Q)-$(SHELL) $^ > $@
 
@@ -20,6 +11,9 @@ busybox.cfg.nosuid: $(srctree)/applets/busybox.mksuid $(objtree)/include/autocon
 	$(Q)-SUID="DROP" $(SHELL) $^ > $@
 
 .PHONY: install
+ifeq ($(CONFIG_INSTALL_APPLET_DONT),y)
+INSTALL_OPTS:= --none
+endif
 ifeq ($(CONFIG_INSTALL_APPLET_SYMLINKS),y)
 INSTALL_OPTS:= --symlinks
 endif
@@ -54,6 +48,9 @@ ifeq ($(strip $(CONFIG_FEATURE_SUID)),y)
 	@echo --------------------------------------------------
 	@echo
 endif
+
+install-noclobber: INSTALL_OPTS+=--noclobber
+install-noclobber: install
 
 uninstall: busybox.links
 	rm -f $(CONFIG_PREFIX)/bin/busybox

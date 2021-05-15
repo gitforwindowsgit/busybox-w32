@@ -64,7 +64,6 @@
 #include "libbb.h"
 #include "common_bufsiz.h"
 #include <syslog.h>
-#include <sys/resource.h>
 
 #if ENABLE_SELINUX
 # include <selinux/selinux.h>  /* for is_selinux_enabled()  */
@@ -246,7 +245,9 @@ static void login_pam_end(pam_handle_t *pamh)
 			pam_strerror(pamh, pamret), pamret);
 	}
 }
-#endif /* ENABLE_PAM */
+#else
+# define login_pam_end(pamh) ((void)0)
+#endif
 
 static void get_username_or_die(char *buf, int size_buf)
 {
@@ -340,6 +341,7 @@ int login_main(int argc UNUSED_PARAM, char **argv)
 #if ENABLE_LOGIN_SESSION_AS_CHILD
 	pid_t child_pid;
 #endif
+	IF_FEATURE_UTMP(pid_t my_pid;)
 
 	INIT_G();
 
@@ -357,7 +359,7 @@ int login_main(int argc UNUSED_PARAM, char **argv)
 	opt = getopt32(argv, "f:h:p", &opt_user, &opt_host);
 	if (opt & LOGIN_OPT_f) {
 		if (!run_by_root)
-			bb_error_msg_and_die("-f is for root only");
+			bb_simple_error_msg_and_die("-f is for root only");
 		safe_strncpy(username, opt_user, sizeof(username));
 	}
 	argv += optind;
@@ -472,6 +474,7 @@ int login_main(int argc UNUSED_PARAM, char **argv)
 		 * to know _why_ login failed */
 		syslog(LOG_WARNING, "pam_%s call failed: %s (%d)", failed_msg,
 					pam_strerror(pamh, pamret), pamret);
+		login_pam_end(pamh);
 		safe_strncpy(username, "UNKNOWN", sizeof(username));
 #else /* not PAM */
 		pw = getpwnam(username);
@@ -502,16 +505,14 @@ int login_main(int argc UNUSED_PARAM, char **argv)
 #endif /* ENABLE_PAM */
  auth_failed:
 		opt &= ~LOGIN_OPT_f;
-		bb_do_delay(LOGIN_FAIL_DELAY);
+		pause_after_failed_login();
 		/* TODO: doesn't sound like correct English phrase to me */
 		puts("Login incorrect");
+		syslog(LOG_WARNING, "invalid password for '%s'%s",
+					username, fromhost);
 		if (++count == 3) {
-			syslog(LOG_WARNING, "invalid password for '%s'%s",
-						username, fromhost);
-
 			if (ENABLE_FEATURE_CLEAN_UP)
 				free(fromhost);
-
 			return EXIT_FAILURE;
 		}
 		username[0] = '\0';
@@ -523,17 +524,19 @@ int login_main(int argc UNUSED_PARAM, char **argv)
 	if (pw->pw_uid != 0)
 		die_if_nologin();
 
+	IF_FEATURE_UTMP(my_pid = getpid();)
+	update_utmp(my_pid, USER_PROCESS, short_tty, username, run_by_root ? opt_host : NULL);
+
 #if ENABLE_LOGIN_SESSION_AS_CHILD
 	child_pid = vfork();
 	if (child_pid != 0) {
 		if (child_pid < 0)
-			bb_perror_msg("vfork");
+			bb_simple_perror_msg("vfork");
 		else {
-			if (safe_waitpid(child_pid, NULL, 0) == -1)
-				bb_perror_msg("waitpid");
-			update_utmp_DEAD_PROCESS(child_pid);
+			wait_for_exitstatus(child_pid);
 		}
-		IF_PAM(login_pam_end(pamh);)
+		update_utmp_DEAD_PROCESS(my_pid);
+		login_pam_end(pamh);
 		return 0;
 	}
 #endif
@@ -544,8 +547,6 @@ int login_main(int argc UNUSED_PARAM, char **argv)
 	 * _f_chown is safe wrt race t=ttyname(0);...;chown(t); */
 	fchown(0, pw->pw_uid, pw->pw_gid);
 	fchmod(0, 0600);
-
-	update_utmp(getpid(), USER_PROCESS, short_tty, username, run_by_root ? opt_host : NULL);
 
 	/* We trust environment only if we run by root */
 	if (ENABLE_LOGIN_SCRIPTS && run_by_root)
@@ -601,7 +602,7 @@ int login_main(int argc UNUSED_PARAM, char **argv)
 	signal(SIGINT, SIG_DFL);
 
 	/* Exec login shell with no additional parameters */
-	run_shell(pw->pw_shell, 1, NULL);
+	exec_login_shell(pw->pw_shell);
 
 	/* return EXIT_FAILURE; - not reached */
 }

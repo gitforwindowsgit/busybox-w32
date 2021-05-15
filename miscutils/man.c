@@ -3,7 +3,7 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config MAN
-//config:	bool "man (27 kb)"
+//config:	bool "man (26 kb)"
 //config:	default y
 //config:	help
 //config:	Format and display manual pages.
@@ -13,9 +13,9 @@
 //kbuild:lib-$(CONFIG_MAN) += man.o
 
 //usage:#define man_trivial_usage
-//usage:       "[-aw] [MANPAGE]..."
+//usage:       "[-aw] [SECTION] MANPAGE[.SECTION]..."
 //usage:#define man_full_usage "\n\n"
-//usage:       "Format and display manual page\n"
+//usage:       "Display manual page\n"
 //usage:     "\n	-a	Display all pages"
 //usage:     "\n	-w	Show page locations"
 //usage:     "\n"
@@ -199,26 +199,18 @@ static char **add_MANPATH(char **man_path_list, int *count_mp, char *path)
 	if (path) while (*path) {
 		char *next_path;
 		char **path_element;
-#if ENABLE_PLATFORM_MINGW32
-		char save = ';';
-
-		next_path = (char *)next_path_sep(path);
-#else
-		next_path = strchr(path, ':');
-#endif
+		next_path = strchr(path, PATH_SEP);
 		if (next_path) {
 			if (next_path == path) /* "::"? */
 				goto next;
-#if ENABLE_PLATFORM_MINGW32
-			save = *next_path;
-#endif
 			*next_path = '\0';
 		}
 		/* Do we already have path? */
 		path_element = man_path_list;
 		if (path_element) while (*path_element) {
-			if (strcmp(*path_element, path) == 0)
+			if (strcmp(*path_element, path) == 0) {
 				goto skip;
+			}
 			path_element++;
 		}
 		man_path_list = xrealloc_vector(man_path_list, 4, *count_mp);
@@ -230,11 +222,7 @@ static char **add_MANPATH(char **man_path_list, int *count_mp, char *path)
 		if (!next_path)
 			break;
 		/* "path" may be a result of getenv(), be nice and don't mangle it */
-#if ENABLE_PLATFORM_MINGW32
-		*next_path = save;
-#else
-		*next_path = ':';
-#endif
+		*next_path = PATH_SEP;
  next:
 		path = next_path + 1;
 	}
@@ -251,39 +239,51 @@ static const char *if_redefined(const char *var, const char *key, const char *li
 	return xstrdup(skip_whitespace(line));
 }
 
+static int is_section_name(const char *sections, const char *str)
+{
+	const char *s = strstr(sections, str);
+	if (s) {
+		int l = strlen(str);
+		return (s[l] == ':' || s[l] == '\0');
+	}
+	return 0;
+}
+
 int man_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int man_main(int argc UNUSED_PARAM, char **argv)
 {
 	parser_t *parser;
+	char *conf_sec_list;
 	char *sec_list;
-	char *cur_path, *cur_sect;
 	char **man_path_list;
 	int count_mp;
-	int cur_mp;
 	int opt, not_found;
 	char *token[2];
+#if ENABLE_PLATFORM_MINGW32
+	char **ptr;
+	char *exepath, *relpath;
+	const char *mpl[] = { "/usr/man", "/usr/share/man", NULL, NULL };
+#endif
 
 	INIT_G();
 
 	opt = getopt32(argv, "^+" "aw" "\0" "-1"/*at least one arg*/);
 	argv += optind;
+#if ENABLE_PLATFORM_MINGW32
+	/* add system drive prefix to filenames, if necessary */
+	for (ptr = argv; *ptr; ++ptr) {
+		if (strchr(*ptr, '/') || strchr(*ptr, '\\'))
+			*ptr = xabsolute_path(*ptr);
+	}
+	chdir_system_drive();
+#endif
 
-	sec_list = xstrdup("0p:1:1p:2:3:3p:4:5:6:7:8:9");
+	conf_sec_list = xstrdup("0p:1:1p:2:3:3p:4:5:6:7:8:9");
 
 	count_mp = 0;
 	man_path_list = add_MANPATH(NULL, &count_mp,
 			getenv("MANDATORY_MANPATH"+10) /* "MANPATH" */
 	);
-	if (!man_path_list) {
-		/* default, may be overridden by /etc/man.conf */
-		man_path_list = xzalloc(2 * sizeof(man_path_list[0]));
-		man_path_list[0] = (char*)"/usr/man";
-		/* count_mp stays 0.
-		 * Thus, man.conf will overwrite man_path_list[0]
-		 * if a path is defined there.
-		 */
-	}
-
 	/* Parse man.conf[ig] or man_db.conf */
 	/* man version 1.6f uses man.config */
 	/* man-db implementation of man uses man_db.conf */
@@ -297,7 +297,7 @@ int man_main(int argc UNUSED_PARAM, char **argv)
 		if (!token[1])
 			continue;
 		if (strcmp("DEFINE", token[0]) == 0) {
-			G.col   = if_redefined(G.tbl  , "col",   token[1]);
+			G.col   = if_redefined(G.col  , "col",   token[1]);
 			G.tbl   = if_redefined(G.tbl  , "tbl",   token[1]);
 			G.nroff = if_redefined(G.nroff, "nroff", token[1]);
 			G.pager = if_redefined(G.pager, "pager", token[1]);
@@ -308,11 +308,31 @@ int man_main(int argc UNUSED_PARAM, char **argv)
 			man_path_list = add_MANPATH(man_path_list, &count_mp, token[1]);
 		}
 		if (strcmp("MANSECT", token[0]) == 0) {
-			free(sec_list);
-			sec_list = xstrdup(token[1]);
+			free(conf_sec_list);
+			conf_sec_list = xstrdup(token[1]);
 		}
 	}
 	config_close(parser);
+
+#if ENABLE_PLATFORM_MINGW32
+	/* allow man pages to be stored relative to the executable */
+	exepath = xstrdup(bb_busybox_exec_path);
+	relpath = concat_path_file(dirname(exepath), "man");
+
+	if (!man_path_list) {
+		mpl[2] = relpath;
+		man_path_list = (char**)mpl;
+	}
+	else {
+		man_path_list = add_MANPATH(man_path_list, &count_mp, relpath);
+	}
+#else
+	if (!man_path_list) {
+		static const char *const mpl[] = { "/usr/man", "/usr/share/man", NULL };
+		man_path_list = (char**)mpl;
+		/*count_mp = 2; - not used below anyway */
+	}
+#endif
 
 	{
 		/* environment overrides setting from man.config */
@@ -328,19 +348,37 @@ int man_main(int argc UNUSED_PARAM, char **argv)
 		G.pager = xasprintf("%s -b -p -x", G.col);
 	}
 
+	/* is 1st ARG a SECTION? */
+	sec_list = conf_sec_list;
+	if (is_section_name(conf_sec_list, *argv)) {
+		/* yes */
+		sec_list = *argv++;
+	}
+
 	not_found = 0;
 	do { /* for each argv[] */
+		const char *cur_path;
+		int cur_mp;
 		int found = 0;
-		cur_mp = 0;
 
 		if (strchr(*argv, '/')) {
 			found = show_manpage(*argv, /*man:*/ 1, 0);
 			goto check_found;
 		}
+
+		/* for each MANPATH */
+		cur_mp = 0;
 		while ((cur_path = man_path_list[cur_mp++]) != NULL) {
-			/* for each MANPATH */
-			cur_sect = sec_list;
-			do { /* for each section */
+			const char *cur_sect = sec_list;
+
+			/* is MANPAGE of the form NAME.SECTION? */
+			char *sect_ext = strrchr(*argv, '.');
+			if (sect_ext && is_section_name(conf_sec_list, sect_ext + 1)) {
+				*sect_ext = '\0';
+				cur_sect = sect_ext + 1;
+			}
+
+			do { /* for each SECTION in cur_sect */
 				char *next_sect = strchrnul(cur_sect, ':');
 				int sect_len = next_sect - cur_sect;
 				char *man_filename;
@@ -367,6 +405,8 @@ int man_main(int argc UNUSED_PARAM, char **argv)
 				while (*cur_sect == ':')
 					cur_sect++;
 			} while (*cur_sect);
+
+			if (sect_ext) *sect_ext = '.';
 		}
  check_found:
 		if (!found) {

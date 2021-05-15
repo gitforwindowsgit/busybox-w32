@@ -10,6 +10,11 @@
 #if ENABLE_PLATFORM_MINGW32
 # if !defined(__MINGW32__) /* HOSTCC is called */
 #  undef ENABLE_PLATFORM_MINGW32
+# else
+#  undef __USE_MINGW_ANSI_STDIO
+#  define __USE_MINGW_ANSI_STDIO 0
+#  undef _WIN32_WINNT
+#  define _WIN32_WINNT 0x502
 # endif
 #else
 # if defined(__MINGW32__)
@@ -37,6 +42,10 @@
 # ifndef __attribute__
 #  define __attribute__(x)
 # endif
+#endif
+
+#if !__GNUC_PREREQ(5,0)
+# define deprecated(msg) deprecated
 #endif
 
 #undef inline
@@ -169,7 +178,6 @@
 # define bswap_64 __bswap64
 # define bswap_32 __bswap32
 # define bswap_16 __bswap16
-# define __BIG_ENDIAN__ (_BYTE_ORDER == _BIG_ENDIAN)
 #elif ENABLE_PLATFORM_MINGW32
 # define __BIG_ENDIAN 0
 # define __LITTLE_ENDIAN 1
@@ -253,6 +261,7 @@ typedef uint64_t bb__aliased_uint64_t FIX_ALIASING;
 # define move_from_unaligned32(v, u32p) ((v) = *(bb__aliased_uint32_t*)(u32p))
 # define move_to_unaligned16(u16p, v)   (*(bb__aliased_uint16_t*)(u16p) = (v))
 # define move_to_unaligned32(u32p, v)   (*(bb__aliased_uint32_t*)(u32p) = (v))
+# define move_to_unaligned64(u64p, v)   (*(bb__aliased_uint64_t*)(u64p) = (v))
 /* #elif ... - add your favorite arch today! */
 #else
 # define BB_UNALIGNED_MEMACCESS_OK 0
@@ -268,6 +277,10 @@ typedef uint64_t bb__aliased_uint64_t FIX_ALIASING;
 # define move_to_unaligned32(u32p, v) do { \
 	uint32_t __t = (v); \
 	memcpy((u32p), &__t, 4); \
+} while (0)
+# define move_to_unaligned64(u64p, v) do { \
+	uint64_t __t = (v); \
+	memcpy((u64p), &__t, 8); \
 } while (0)
 #endif
 
@@ -327,7 +340,7 @@ typedef unsigned smalluint;
 #endif
 
 /* Define bb_setpgrp */
-#if defined(__digital__) && defined(__unix__)
+#if (defined(__digital__) && defined(__unix__)) || defined(__FreeBSD__)
 /* use legacy setpgrp(pid_t, pid_t) for now.  move to platform.c */
 # define bb_setpgrp() do { pid_t __me = getpid(); setpgrp(__me, __me); } while (0)
 #else
@@ -350,6 +363,8 @@ typedef unsigned smalluint;
 # define ALIGN2
 # define ALIGN4
 #endif
+#define ALIGN8     __attribute__((aligned(8)))
+#define ALIGN_PTR  __attribute__((aligned(sizeof(void*))))
 
 /*
  * For 0.9.29 and svn, __ARCH_USE_MMU__ indicates no-mmu reliably.
@@ -413,6 +428,7 @@ typedef unsigned smalluint;
 #define HAVE_SETBIT 1
 #define HAVE_SIGHANDLER_T 1
 #define HAVE_STPCPY 1
+#define HAVE_STPNCPY 1
 #define HAVE_MEMPCPY 1
 #define HAVE_STRCASESTR 1
 #define HAVE_STRCHRNUL 1
@@ -442,12 +458,14 @@ typedef unsigned smalluint;
 #endif
 
 #if ENABLE_PLATFORM_MINGW32
+# undef HAVE_FDATASYNC
 # undef HAVE_DPRINTF
 # undef HAVE_GETLINE
 # undef HAVE_MEMRCHR
 # undef HAVE_MKDTEMP
 # undef HAVE_SETBIT
 # undef HAVE_STPCPY
+# undef HAVE_STPNCPY
 # undef HAVE_STRCASESTR
 # undef HAVE_STRCHRNUL
 # undef HAVE_STRSEP
@@ -468,6 +486,7 @@ typedef unsigned smalluint;
 # undef HAVE_MKDTEMP
 # undef HAVE_SETBIT
 # undef HAVE_STPCPY
+# undef HAVE_STPNCPY
 # undef HAVE_STRCASESTR
 # undef HAVE_STRCHRNUL
 # undef HAVE_STRSEP
@@ -540,6 +559,7 @@ typedef unsigned smalluint;
 
 #if defined(__digital__) && defined(__unix__)
 # undef HAVE_STPCPY
+# undef HAVE_STPNCPY
 #endif
 
 #if defined(ANDROID) || defined(__ANDROID__)
@@ -556,6 +576,7 @@ typedef unsigned smalluint;
 #  undef HAVE_TTYNAME_R
 #  undef HAVE_GETLINE
 #  undef HAVE_STPCPY
+#  undef HAVE_STPNCPY
 # endif
 # undef HAVE_MEMPCPY
 # undef HAVE_STRCHRNUL
@@ -599,6 +620,10 @@ typedef void (*sighandler_t)(int);
 
 #ifndef HAVE_STPCPY
 extern char *stpcpy(char *p, const char *to_add) FAST_FUNC;
+#endif
+
+#ifndef HAVE_STPNCPY
+extern char *stpncpy(char *p, const char *to_add, size_t n) FAST_FUNC;
 #endif
 
 #ifndef HAVE_MEMPCPY

@@ -11,7 +11,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config SCRIPT
-//config:	bool "script (8 kb)"
+//config:	bool "script (8.6 kb)"
 //config:	default y
 //config:	help
 //config:	The script makes typescript of terminal session.
@@ -172,7 +172,7 @@ int script_main(int argc UNUSED_PARAM, char **argv)
 						struct timeval tv;
 						double newtime;
 
-						gettimeofday(&tv, NULL);
+						xgettimeofday(&tv);
 						newtime = tv.tv_sec + (double) tv.tv_usec / 1000000;
 						fprintf(timing_fp, "%f %u\n", newtime - oldtime, count);
 						oldtime = newtime;

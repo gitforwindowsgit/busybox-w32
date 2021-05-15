@@ -7,7 +7,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config STRINGS
-//config:	bool "strings (4.3 kb)"
+//config:	bool "strings (4.6 kb)"
 //config:	default y
 //config:	help
 //config:	strings prints the printable character sequences for each file
@@ -92,7 +92,7 @@ int strings_main(int argc UNUSED_PARAM, char **argv)
 						if (option_mask32 & (PRINT_OFFSET | PRINT_RADIX)) {
 							printf(radix_fmt, offset - n);
 						}
-						fputs(string, stdout);
+						fputs_stdout(string);
 					}
 					count++;
 				}

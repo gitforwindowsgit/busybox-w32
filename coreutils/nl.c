@@ -5,7 +5,7 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config NL
-//config:	bool "nl (4.3 kb)"
+//config:	bool "nl (4.6 kb)"
 //config:	default y
 //config:	help
 //config:	nl is used to number lines of files.
@@ -19,7 +19,7 @@
 //usage:#define nl_full_usage "\n\n"
 //usage:       "Write FILEs to standard output with line numbers added\n"
 //usage:     "\n	-b STYLE	Which lines to number - a: all, t: nonempty, n: none"
-//^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^TODO: support "pBRE": number only lines thatmatch regexp BRE"
+//^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^TODO: support "pBRE": number only lines that match regexp BRE"
 ////usage:     "\n	-f STYLE	footer lines"
 ////usage:     "\n	-h STYLE	header lines"
 ////usage:     "\n	-d CC		use CC for separating logical pages"
@@ -58,6 +58,8 @@ int nl_main(int argc UNUSED_PARAM, char **argv)
 		"number-width\0"	Required_argument "w"
 	;
 #endif
+	int exitcode;
+
 	ns.width = 6;
 	ns.start = 1;
 	ns.inc = 1;
@@ -66,15 +68,16 @@ int nl_main(int argc UNUSED_PARAM, char **argv)
 			&ns.width, &ns.sep, &ns.start, &ns.inc, &opt_b);
 	ns.all = (opt_b[0] == 'a');
 	ns.nonempty = (opt_b[0] == 't');
-	ns.empty_str = xasprintf("%*s\n", ns.width + (int)strlen(ns.sep), "");
+	ns.empty_str = xasprintf("%*s", ns.width + (int)strlen(ns.sep), "");
 
 	argv += optind;
 	if (!*argv)
 		*--argv = (char*)"-";
 
+	exitcode = EXIT_SUCCESS;
 	do {
-		print_numbered_lines(&ns, *argv);
+		exitcode |= print_numbered_lines(&ns, *argv);
 	} while (*++argv);
 
-	fflush_stdout_and_exit(EXIT_SUCCESS);
+	fflush_stdout_and_exit(exitcode);
 }

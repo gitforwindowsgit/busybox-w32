@@ -8,8 +8,8 @@
 typedef int gid_t;
 typedef int uid_t;
 
-#define DEFAULT_UID 1000
-#define DEFAULT_GID 1000
+#define DEFAULT_UID 4095
+#define DEFAULT_GID DEFAULT_UID
 
 /*
  * arpa/inet.h
@@ -30,6 +30,9 @@ int inet_pton(int af, const char *src, void *dst);
 #define FD_CLOEXEC 0x1
 #define O_NONBLOCK 0
 #define O_NOFOLLOW 0
+#define O_NOCTTY 0
+#define O_DIRECT 0
+#define O_SPECIAL 0x800000
 
 /*
  * grp.h
@@ -52,6 +55,22 @@ int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups);
  */
 #define NAME_MAX 255
 #define MAXSYMLINKS 20
+
+#ifdef LONG_MAX
+# if LONG_MAX == 2147483647
+#  define LONG_BIT  32
+# else
+/* Safe assumption.  */
+#  define LONG_BIT  64
+# endif
+#elif defined __LONG_MAX__
+# if __LONG_MAX__ == 2147483647
+#  define LONG_BIT  32
+# else
+/* Safe assumption.  */
+#  define LONG_BIT  64
+# endif
+#endif
 
 /*
  * netdb.h
@@ -90,39 +109,14 @@ IMPL(getpwent,struct passwd *,NULL,void)
 /*
  * signal.h
  */
-#define SIGHUP 1
-#define SIGQUIT 3
 #define SIGKILL 9
-#define SIGUSR1 10
-#define SIGUSR2 12
 #define SIGPIPE 13
-#define SIGALRM 14
-#define SIGCHLD 17
-#define SIGCONT 18
-#define SIGSTOP 19
-#define SIGTSTP 20
-#define SIGTTIN 21
-#define SIGTTOU 22
-#define SIGXCPU 24
-#define SIGXFSZ 25
-#define SIGVTALRM 26
-#define SIGWINCH 28
 
 #define SIG_UNBLOCK 1
 
-typedef void (__cdecl *sighandler_t)(int);
-struct sigaction {
-	sighandler_t sa_handler;
-	unsigned sa_flags;
-	int sa_mask;
-};
-#define sigemptyset(x) (void)0
-#define SA_RESTART 0
-
-NOIMPL(sigaction,int sig UNUSED_PARAM, struct sigaction *in UNUSED_PARAM, struct sigaction *out UNUSED_PARAM);
-NOIMPL(sigfillset,int *mask UNUSED_PARAM);
-NOIMPL(FAST_FUNC sigprocmask_allsigs, int how UNUSED_PARAM);
-NOIMPL(FAST_FUNC sigaction_set,int signo UNUSED_PARAM, const struct sigaction *sa UNUSED_PARAM);
+typedef void (*sighandler_t)(int);
+sighandler_t winansi_signal(int signum, sighandler_t handler);
+#define signal(s, h) winansi_signal(s, h)
 
 /*
  * stdio.h
@@ -139,6 +133,7 @@ int mingw_rename(const char*, const char*);
 FILE *mingw_popen(const char *cmd, const char *mode);
 int mingw_popen_fd(const char *cmd, const char *mode, int fd0, pid_t *pid);
 int mingw_pclose(FILE *fd);
+pid_t mingw_fork_compressor(int fd, const char *compressor, const char *mode);
 #undef popen
 #undef pclose
 #define popen mingw_popen
@@ -150,12 +145,15 @@ int mingw_pclose(FILE *fd);
  * ANSI emulation wrappers
  */
 
+void set_title(const char *str);
 void move_cursor_row(int n);
 void reset_screen(void);
 int winansi_putchar(int c);
 int winansi_puts(const char *s);
 size_t winansi_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 int winansi_fputs(const char *str, FILE *stream);
+int winansi_fputc(int c, FILE *stream);
+int winansi_vsnprintf(char *buf, size_t size, const char *format, va_list list);
 int winansi_vfprintf(FILE *stream, const char *format, va_list list);
 int winansi_printf(const char *format, ...) __attribute__((format (printf, 1, 2)));
 int winansi_fprintf(FILE *stream, const char *format, ...) __attribute__((format (printf, 2, 3)));
@@ -166,6 +164,10 @@ int winansi_getc(FILE *stream);
 #define puts winansi_puts
 #define fwrite winansi_fwrite
 #define fputs winansi_fputs
+#define fputc winansi_fputc
+#if !defined(__USE_MINGW_ANSI_STDIO) || !__USE_MINGW_ANSI_STDIO
+#define vsnprintf(buf, size, ...) winansi_vsnprintf(buf, size,  __VA_ARGS__)
+#endif
 #define vfprintf(stream, ...) winansi_vfprintf(stream, __VA_ARGS__)
 #define vprintf(...) winansi_vfprintf(stdout, __VA_ARGS__)
 #define printf(...) winansi_printf(__VA_ARGS__)
@@ -173,8 +175,6 @@ int winansi_getc(FILE *stream);
 #define write winansi_write
 #define read winansi_read
 #define getc winansi_getc
-
-int winansi_get_terminal_width_height(struct winsize *win);
 
 /*
  * stdlib.h
@@ -184,6 +184,7 @@ int winansi_get_terminal_width_height(struct winsize *win);
 #define WEXITSTATUS(x) (((x) & 0xff00) >> 8)
 #define WIFSIGNALED(x) (((signed char) (((x) & 0x7f) + 1) >> 1) > 0)
 #define WCOREDUMP(x) 0
+#define WIFSTOPPED(x) 0
 
 int mingw_system(const char *cmd);
 #define system mingw_system
@@ -195,17 +196,16 @@ char *mingw_mktemp(char *template);
 int mkstemp(char *template);
 char *realpath(const char *path, char *resolved_path);
 int setenv(const char *name, const char *value, int replace);
-#if ENABLE_SAFE_ENV
 int unsetenv(const char *env);
-#else
-void unsetenv(const char *env);
-#endif
 
 #define getenv mingw_getenv
-#if ENABLE_SAFE_ENV
 #define putenv mingw_putenv
-#endif
 #define mktemp mingw_mktemp
+
+/*
+ * string.h
+ */
+char *strndup(char const *s, size_t n);
 
 /*
  * strings.h
@@ -236,18 +236,37 @@ int mingw_listen(int sockfd, int backlog);
 int mingw_accept(int sockfd1, struct sockaddr *sa, socklen_t *sz);
 int mingw_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *xfds,
             struct timeval *timeout);
-
-NOIMPL(mingw_sendto,SOCKET s UNUSED_PARAM, const char *buf UNUSED_PARAM, int len UNUSED_PARAM, int flags UNUSED_PARAM, const struct sockaddr *sa UNUSED_PARAM, int salen UNUSED_PARAM);
+int mingw_getpeername(int fd, struct sockaddr *sa, socklen_t *sz);
+int mingw_gethostname(char *host, int namelen);
+int mingw_getaddrinfo(const char *node, const char *service,
+			const struct addrinfo *hints, struct addrinfo **res);
+struct hostent *mingw_gethostbyaddr(const void *addr, socklen_t len, int type);
 
 #define socket mingw_socket
 #define connect mingw_connect
-#define sendto mingw_sendto
 #define listen mingw_listen
 #define bind mingw_bind
 #define setsockopt mingw_setsockopt
 #define shutdown mingw_shutdown
 #define accept mingw_accept
 #define select mingw_select
+#define getpeername mingw_getpeername
+#define gethostname mingw_gethostname
+#define getaddrinfo mingw_getaddrinfo
+#define gethostbyaddr mingw_gethostbyaddr
+
+/*
+ * sys/time.h
+ */
+#ifndef _TIMESPEC_DEFINED
+#define _TIMESPEC_DEFINED
+struct timespec {
+	time_t tv_sec;
+	long int tv_nsec;
+};
+#endif
+
+int nanosleep(const struct timespec *req, struct timespec *rem);
 
 /*
  * sys/stat.h
@@ -273,12 +292,19 @@ NOIMPL(mingw_sendto,SOCKET s UNUSED_PARAM, const char *buf UNUSED_PARAM, int len
 #define S_IWOTH (S_IWGRP >> 3)
 #define S_IXOTH (S_IXGRP >> 3)
 
+mode_t mingw_umask(mode_t mode);
+#define umask mingw_umask
+
+#define DEFAULT_UMASK 0002
+
 IMPL(fchmod,int,0,int fildes UNUSED_PARAM, mode_t mode UNUSED_PARAM);
 NOIMPL(fchown,int fd UNUSED_PARAM, uid_t uid UNUSED_PARAM, gid_t gid UNUSED_PARAM);
 int mingw_mkdir(const char *path, int mode);
+int mingw_chdir(const char *path);
 int mingw_chmod(const char *path, int mode);
 
 #define mkdir mingw_mkdir
+#define chdir mingw_chdir
 #define chmod mingw_chmod
 
 #if ENABLE_LFS && !defined(__MINGW64_VERSION_MAJOR)
@@ -288,6 +314,9 @@ int mingw_chmod(const char *path, int mode);
 typedef int nlink_t;
 typedef int blksize_t;
 typedef off_t blkcnt_t;
+#if ENABLE_FEATURE_EXTRA_FILE_DATA
+#define ino_t uint64_t
+#endif
 
 struct mingw_stat {
 	dev_t     st_dev;
@@ -298,12 +327,16 @@ struct mingw_stat {
 	gid_t     st_gid;
 	dev_t     st_rdev;
 	off_t     st_size;
-	time_t    st_atime;
-	time_t    st_mtime;
-	time_t    st_ctime;
+	struct timespec st_atim;
+	struct timespec st_mtim;
+	struct timespec st_ctim;
 	blksize_t st_blksize;
 	blkcnt_t  st_blocks;
+	DWORD     st_attr;
 };
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
 
 int mingw_lstat(const char *file_name, struct mingw_stat *buf);
 int mingw_stat(const char *file_name, struct mingw_stat *buf);
@@ -316,6 +349,26 @@ int mingw_fstat(int fd, struct mingw_stat *buf);
 #define fstat mingw_fstat
 
 /*
+ * sys/sysinfo.h
+ */
+struct sysinfo {
+	long uptime;             /* Seconds since boot */
+	unsigned long loads[3];  /* 1, 5, and 15 minute load averages */
+	unsigned long totalram;  /* Total usable main memory size */
+	unsigned long freeram;   /* Available memory size */
+	unsigned long sharedram; /* Amount of shared memory */
+	unsigned long bufferram; /* Memory used by buffers */
+	unsigned long totalswap; /* Total swap space size */
+	unsigned long freeswap;  /* Swap space still available */
+	unsigned short procs;    /* Number of current processes */
+	unsigned long totalhigh; /* Total high memory size */
+	unsigned long freehigh;  /* Available high memory size */
+	unsigned int mem_unit;   /* Memory unit size in bytes */
+};
+
+int sysinfo(struct sysinfo *info);
+
+/*
  * sys/sysmacros.h
  */
 #define makedev(a,b) 0*(a)*(b) /* avoid unused warning */
@@ -323,24 +376,12 @@ int mingw_fstat(int fd, struct mingw_stat *buf);
 #define major(x) 0
 
 /*
- * sys/time.h
- */
-#ifndef _TIMESPEC_DEFINED
-#define _TIMESPEC_DEFINED
-struct timespec {
-	time_t tv_sec;
-	long int tv_nsec;
-};
-#endif
-
-int nanosleep(const struct timespec *req, struct timespec *rem);
-
-/*
  * sys/wait.h
  */
 #define WNOHANG 1
 #define WUNTRACED 2
-int waitpid(pid_t pid, int *status, int options);
+pid_t waitpid(pid_t pid, int *status, int options);
+pid_t mingw_wait3(pid_t pid, int *status, int options, struct rusage *rusage);
 
 /*
  * time.h
@@ -349,7 +390,6 @@ struct tm *gmtime_r(const time_t *timep, struct tm *result);
 struct tm *localtime_r(const time_t *timep, struct tm *result);
 char *strptime(const char *s, const char *format, struct tm *tm);
 size_t mingw_strftime(char *buf, size_t max, const char *format, const struct tm *tm);
-int stime(time_t *t);
 
 #define strftime mingw_strftime
 
@@ -387,29 +427,40 @@ char *mingw_getcwd(char *pointer, int len);
 off_t mingw_lseek(int fd, off_t offset, int whence);
 
 
-IMPL(getgid,int,DEFAULT_GID,void);
+int getuid(void);
+#define getgid getuid
+#define geteuid getuid
+#define getegid getuid
 int getgroups(int n, gid_t *groups);
 IMPL(getppid,int,1,void);
-IMPL(getegid,int,DEFAULT_GID,void);
-IMPL(geteuid,int,DEFAULT_UID,void);
 NOIMPL(getsid,pid_t pid UNUSED_PARAM);
-IMPL(getuid,int,DEFAULT_UID,void);
 int getlogin_r(char *buf, size_t len);
 int fcntl(int fd, int cmd, ...);
-IMPL(fsync,int,0,int fd UNUSED_PARAM);
+int fsync(int fd);
 int kill(pid_t pid, int sig);
 int link(const char *oldpath, const char *newpath);
 NOIMPL(mknod,const char *name UNUSED_PARAM, mode_t mode UNUSED_PARAM, dev_t device UNUSED_PARAM);
+/* order of devices must match that in get_dev_type */
+enum {DEV_NULL, DEV_ZERO, DEV_URANDOM, NOT_DEVICE = -1};
+int get_dev_type(const char *filename);
+void update_dev_fd(int dev, int fd);
 int mingw_open (const char *filename, int oflags, ...);
+
+/* functions which add O_SPECIAL to open(2) to allow access to devices */
+int mingw_xopen(const char *filename, int oflags);
+ssize_t mingw_open_read_close(const char *fn, void *buf, size_t size) FAST_FUNC;
+
+ssize_t mingw_read(int fd, void *buf, size_t count);
+int mingw_close(int fd);
 int pipe(int filedes[2]);
-NOIMPL(readlink,const char *path UNUSED_PARAM, char *buf UNUSED_PARAM, size_t bufsiz UNUSED_PARAM);
+ssize_t readlink(const char *pathname, char *buf, size_t bufsiz);
 NOIMPL(setgid,gid_t gid UNUSED_PARAM);
 NOIMPL(setegid,gid_t gid UNUSED_PARAM);
 NOIMPL(setsid,void);
 NOIMPL(setuid,uid_t gid UNUSED_PARAM);
 NOIMPL(seteuid,uid_t gid UNUSED_PARAM);
 unsigned int sleep(unsigned int seconds);
-NOIMPL(symlink,const char *oldpath UNUSED_PARAM, const char *newpath UNUSED_PARAM);
+int symlink(const char *target, const char *linkpath);
 static inline void sync(void) {}
 long sysconf(int name);
 IMPL(getpagesize,int,4096,void);
@@ -424,6 +475,7 @@ int mingw_isatty(int fd);
 #define getcwd mingw_getcwd
 #define lchown chown
 #define open mingw_open
+#define close mingw_close
 #define unlink mingw_unlink
 #define rmdir mingw_rmdir
 #undef lseek
@@ -441,15 +493,14 @@ int utimes(const char *file_name, const struct timeval times[2]);
 /*
  * dirent.h
  */
-#define PATH_MAX_LONG 4096
 struct dirent {
-	char d_name[PATH_MAX_LONG];
+	char d_name[PATH_MAX];
 };
 
 struct DIR {
 	struct dirent dirent;
 	HANDLE handle;
-	WIN32_FIND_DATAW find_data;
+	WIN32_FIND_DATA find_data;
 };
 typedef struct DIR DIR;
 
@@ -461,11 +512,18 @@ int mingw_closedir(DIR *dir);
 #define closedir mingw_closedir
 
 /*
+ * Functions with different prototypes in BusyBox and WIN32
+ */
+#define itoa bb_itoa
+#define strrev bb_strrev
+
+/*
  * MinGW specific
  */
 #define is_dir_sep(c) ((c) == '/' || (c) == '\\')
 
 pid_t FAST_FUNC mingw_spawn(char **argv);
+pid_t FAST_FUNC mingw_spawn_detach(char **argv);
 intptr_t FAST_FUNC mingw_spawn_proc(const char **argv);
 int mingw_execv(const char *cmd, char *const *argv);
 int mingw_execvp(const char *cmd, char *const *argv);
@@ -475,32 +533,56 @@ int mingw_execve(const char *cmd, char *const *argv, char *const *envp);
 #define execve mingw_execve
 #define execv mingw_execv
 
-int mingw_chdir(const char *path);
-#define chdir mingw_chdir
-
-const char * next_path_sep(const char *path);
 #define has_dos_drive_prefix(path) (isalpha(*(path)) && (path)[1] == ':')
-#define is_absolute_path(path) ((path)[0] == '/' || (path)[0] == '\\' || has_dos_drive_prefix(path))
+
+int kill_SIGTERM_by_handle(HANDLE process);
 
 #define find_mount_point(n, s) find_mount_point(n)
-#define add_to_ino_dev_hashtable(s, n) (void)0
+
+char *is_prefixed_with_case(const char *string, const char *key) FAST_FUNC;
+char *is_suffixed_with_case(const char *string, const char *key) FAST_FUNC;
+void qsort_string_vector_case(char **sv, unsigned count) FAST_FUNC;
 
 /*
  * helpers
  */
 
-char **env_setenv(char **env, const char *name);
-
 const char *get_busybox_exec_path(void);
 void init_winsock(void);
+void init_codepage(void);
 
-wchar_t *mingw_pathconv(const char *path);
+const char *mingw_pathconv(const char *path);
+int has_bat_suffix(const char *p);
 int has_exe_suffix(const char *p);
-char *file_is_win32_executable(const char *p);
+int has_exe_suffix_or_dot(const char *name);
+int add_win32_extension(char *p);
 
-int err_win_to_posix(DWORD winerr);
+char *bs_to_slash(char *p) FAST_FUNC;
+void slash_to_bs(char *p) FAST_FUNC;
+size_t remove_cr(char *p, size_t len) FAST_FUNC;
+
+int err_win_to_posix(void);
 
 ULONGLONG CompatGetTickCount64(void);
 #define GetTickCount64 CompatGetTickCount64
+
+ssize_t get_random_bytes(void *buf, ssize_t count);
+int enumerate_links(const char *file, char *name);
+void hide_console(void);
+
+int unc_root_len(const char *dir);
+int root_len(const char *path);
+const char *get_system_drive(void);
+const char *need_system_drive(const char *path);
+char *alloc_system_drive(const char *path);
+int chdir_system_drive(void);
+char *xabsolute_path(char *path);
+char *get_drive_cwd(const char *path, char *buffer, int size);
+void fix_path_case(char *path);
+void make_sparse(int fd, off_t start, off_t end);
+int skip_ansi_emulation(int reset);
+int unix_path(const char *path);
+int has_path(const char *file);
+int is_absolute_path(const char *path);
 
 void initialize_critical_sections(void);

@@ -8,9 +8,8 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config UMOUNT
-//config:	bool "umount (4.5 kb)"
+//config:	bool "umount (5.1 kb)"
 //config:	default y
-//config:	select PLATFORM_LINUX
 //config:	help
 //config:	When you want to remove a mounted filesystem from its current mount
 //config:	point, for example when you are shutting down the system, the
@@ -42,21 +41,22 @@
 //kbuild:lib-$(CONFIG_UMOUNT) += umount.o
 
 //usage:#define umount_trivial_usage
-//usage:       "[OPTIONS] FILESYSTEM|DIRECTORY"
+//usage:       "[-rlf"IF_FEATURE_MTAB_SUPPORT("m")IF_FEATURE_MOUNT_LOOP("d")IF_FEATURE_UMOUNT_ALL("a")"] [-t FSTYPE] FILESYSTEM|DIRECTORY"
 //usage:#define umount_full_usage "\n\n"
-//usage:       "Unmount file systems\n"
+//usage:       "Unmount filesystems\n"
 //usage:	IF_FEATURE_UMOUNT_ALL(
-//usage:     "\n	-a	Unmount all file systems" IF_FEATURE_MTAB_SUPPORT(" in /etc/mtab")
+//usage:     "\n	-a	Unmount all filesystems" IF_FEATURE_MTAB_SUPPORT(" in /etc/mtab")
 //usage:	)
 //usage:	IF_FEATURE_MTAB_SUPPORT(
 //usage:     "\n	-n	Don't erase /etc/mtab entries"
 //usage:	)
-//usage:     "\n	-r	Try to remount devices as read-only if mount is busy"
+//usage:     "\n	-r	Remount devices read-only if mount is busy"
 //usage:     "\n	-l	Lazy umount (detach filesystem)"
 //usage:     "\n	-f	Force umount (i.e., unreachable NFS server)"
 //usage:	IF_FEATURE_MOUNT_LOOP(
 //usage:     "\n	-d	Free loop device if it has been used"
 //usage:	)
+//usage:     "\n	-t FSTYPE[,...]	Unmount only these filesystem type(s)"
 //usage:
 //usage:#define umount_example_usage
 //usage:       "$ umount /dev/hdc1\n"
@@ -81,8 +81,8 @@ static struct mntent *getmntent_r(FILE* stream, struct mntent* result,
 }
 #endif
 
-/* ignored: -v -t -i */
-#define OPTION_STRING           "fldnra" "vt:i"
+/* ignored: -c -v -i */
+#define OPTION_STRING           "fldnrat:" "cvi"
 #define OPT_FORCE               (1 << 0) // Same as MNT_FORCE
 #define OPT_LAZY                (1 << 1) // Same as MNT_DETACH
 #define OPT_FREELOOP            (1 << 2)
@@ -143,7 +143,8 @@ int umount_main(int argc UNUSED_PARAM, char **argv)
 	}
 
 	// If we're not umounting all, we need at least one argument.
-	if (!(opt & OPT_ALL) && !fstype) {
+	// Note: "-t FSTYPE" does not imply -a.
+	if (!(opt & OPT_ALL)) {
 		if (!argv[0])
 			bb_show_usage();
 		m = NULL;

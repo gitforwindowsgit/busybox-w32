@@ -7,7 +7,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config LOGGER
-//config:	bool "logger (6.4 kb)"
+//config:	bool "logger (6.3 kb)"
 //config:	default y
 //config:	select FEATURE_SYSLOG
 //config:	help
@@ -21,7 +21,7 @@
 //kbuild:lib-$(CONFIG_LOGGER) += syslogd_and_logger.o
 
 //usage:#define logger_trivial_usage
-//usage:       "[OPTIONS] [MESSAGE]"
+//usage:       "[-s] [-t TAG] [-p PRIO] [MESSAGE]"
 //usage:#define logger_full_usage "\n\n"
 //usage:       "Write MESSAGE (or stdin) to syslog\n"
 //usage:     "\n	-s	Log to stderr as well as the system log"

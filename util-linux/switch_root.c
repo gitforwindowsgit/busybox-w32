@@ -7,9 +7,8 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config SWITCH_ROOT
-//config:	bool "switch_root (5.2 kb)"
+//config:	bool "switch_root (5.5 kb)"
 //config:	default y
-//config:	select PLATFORM_LINUX
 //config:	help
 //config:	The switch_root utility is used from initramfs to select a new
 //config:	root device. Under initramfs, you have to use this instead of
@@ -39,6 +38,12 @@
 #include <sys/mount.h>
 #if ENABLE_RUN_INIT
 # include <sys/prctl.h>
+# ifndef PR_CAPBSET_READ
+# define PR_CAPBSET_READ 23
+# endif
+# ifndef PR_CAPBSET_DROP
+# define PR_CAPBSET_DROP 24
+# endif
 # include <linux/capability.h>
 // #include <sys/capability.h>
 // This header is in libcap, but the functions are in libc.
@@ -111,7 +116,7 @@ static void drop_capset(int cap_idx)
 	getcaps(&caps);
 	caps.data[CAP_TO_INDEX(cap_idx)].inheritable &= ~CAP_TO_MASK(cap_idx);
 	if (capset(&caps.header, caps.data) != 0)
-		bb_perror_msg_and_die("capset");
+		bb_simple_perror_msg_and_die("capset");
 }
 
 static void drop_bounding_set(int cap_idx)
@@ -159,7 +164,7 @@ static void drop_capabilities(char *string)
 {
 	char *cap;
 
-	cap = strtok(string, ",");
+	cap = strtok_r(string, ",", &string);
 	while (cap) {
 		unsigned cap_idx;
 
@@ -169,7 +174,7 @@ static void drop_capabilities(char *string)
 		drop_bounding_set(cap_idx);
 		drop_capset(cap_idx);
 		bb_error_msg("dropped capability: %s", cap);
-		cap = strtok(NULL, ",");
+		cap = strtok_r(NULL, ",", &string);
 	}
 }
 #endif
@@ -247,7 +252,7 @@ int switch_root_main(int argc UNUSED_PARAM, char **argv)
 	if ((unsigned)stfs.f_type != RAMFS_MAGIC
 	 && (unsigned)stfs.f_type != TMPFS_MAGIC
 	) {
-		bb_error_msg_and_die("root filesystem is not ramfs/tmpfs");
+		bb_simple_error_msg_and_die("root filesystem is not ramfs/tmpfs");
 	}
 
 	if (!dry_run) {
@@ -257,7 +262,7 @@ int switch_root_main(int argc UNUSED_PARAM, char **argv)
 		// Overmount / with newdir and chroot into it
 		if (mount(".", "/", NULL, MS_MOVE, NULL)) {
 			// For example, fails when newroot is not a mountpoint
-			bb_perror_msg_and_die("error moving root");
+			bb_simple_perror_msg_and_die("error moving root");
 		}
 	}
 	xchroot(".");

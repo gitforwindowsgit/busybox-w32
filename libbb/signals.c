@@ -18,6 +18,7 @@ void record_signo(int signo)
 	bb_got_signal = signo;
 }
 
+#if !ENABLE_PLATFORM_MINGW32
 /* Saves 2 bytes on x86! Oh my... */
 int FAST_FUNC sigaction_set(int signum, const struct sigaction *act)
 {
@@ -30,6 +31,17 @@ int FAST_FUNC sigprocmask_allsigs(int how)
 	sigfillset(&set);
 	return sigprocmask(how, &set, NULL);
 }
+
+int FAST_FUNC sigprocmask2(int how, sigset_t *set)
+{
+	// Grr... gcc 8.1.1:
+	// "passing argument 3 to restrict-qualified parameter aliases with argument 2"
+	// dance around that...
+	sigset_t *oset FIX_ALIASING;
+	oset = set;
+	return sigprocmask(how, set, oset);
+}
+#endif
 
 void FAST_FUNC bb_signals(int sigs, void (*f)(int))
 {

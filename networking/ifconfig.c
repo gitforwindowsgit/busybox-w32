@@ -27,7 +27,6 @@
 //config:config IFCONFIG
 //config:	bool "ifconfig (12 kb)"
 //config:	default y
-//config:	select PLATFORM_LINUX
 //config:	help
 //config:	Ifconfig is used to configure the kernel-resident network interfaces.
 //config:
@@ -77,7 +76,7 @@
 //kbuild:lib-$(CONFIG_IFCONFIG) += ifconfig.o interface.o
 
 //usage:#define ifconfig_trivial_usage
-//usage:	IF_FEATURE_IFCONFIG_STATUS("[-a]") " interface [address]"
+//usage:	IF_FEATURE_IFCONFIG_STATUS("[-a]") " [IFACE] [ADDRESS]"
 //usage:#define ifconfig_full_usage "\n\n"
 //usage:       "Configure a network interface\n"
 //usage:     "\n"
@@ -248,7 +247,7 @@ struct options {
  * Set up the tables.  Warning!  They must have corresponding order!
  */
 
-static const struct arg1opt Arg1Opt[] = {
+static const struct arg1opt Arg1Opt[] ALIGN_PTR = {
 	{ "SIFMETRIC",  SIOCSIFMETRIC,  ifreq_offsetof(ifr_metric) },
 	{ "SIFMTU",     SIOCSIFMTU,     ifreq_offsetof(ifr_mtu) },
 	{ "SIFTXQLEN",  SIOCSIFTXQLEN,  ifreq_offsetof(ifr_qlen) },
@@ -278,7 +277,7 @@ static const struct arg1opt Arg1Opt[] = {
 	{ "SIFADDR",    SIOCSIFADDR,    ifreq_offsetof(ifr_addr) },
 };
 
-static const struct options OptArray[] = {
+static const struct options OptArray[] ALIGN_PTR = {
 	{ "metric",      N_ARG,         ARG_METRIC,      0 },
 	{ "mtu",         N_ARG,         ARG_MTU,         0 },
 	{ "txqueuelen",  N_ARG,         ARG_TXQUEUELEN,  0 },
@@ -338,6 +337,7 @@ int ifconfig_main(int argc UNUSED_PARAM, char **argv)
 	char *p;
 	/*char host[128];*/
 	const char *host = NULL; /* make gcc happy */
+	IF_FEATURE_IFCONFIG_STATUS(char *show_all_param;)
 
 	did_flags = 0;
 #if ENABLE_FEATURE_IFCONFIG_BROADCAST_PLUS
@@ -349,17 +349,18 @@ int ifconfig_main(int argc UNUSED_PARAM, char **argv)
 	++argv;
 
 #if ENABLE_FEATURE_IFCONFIG_STATUS
-	if (argv[0] && (argv[0][0] == '-' && argv[0][1] == 'a' && !argv[0][2])) {
-		interface_opt_a = 1;
+	show_all_param = NULL;
+	if (argv[0] && argv[0][0] == '-' && argv[0][1] == 'a' && !argv[0][2]) {
 		++argv;
+		show_all_param = IFNAME_SHOW_DOWNED_TOO;
 	}
 #endif
 
 	if (!argv[0] || !argv[1]) { /* one or no args */
 #if ENABLE_FEATURE_IFCONFIG_STATUS
-		return display_interfaces(argv[0] /* can be NULL */);
+		return display_interfaces(argv[0] ? argv[0] : show_all_param);
 #else
-		bb_error_msg_and_die("no support for status display");
+		bb_simple_error_msg_and_die("no support for status display");
 #endif
 	}
 

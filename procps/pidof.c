@@ -7,7 +7,7 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config PIDOF
-//config:	bool "pidof (6.6 kb)"
+//config:	bool "pidof (6.3 kb)"
 //config:	default y
 //config:	help
 //config:	Pidof finds the process id's (pids) of the named programs. It prints
@@ -39,7 +39,7 @@
 
 //usage:#if (ENABLE_FEATURE_PIDOF_SINGLE || ENABLE_FEATURE_PIDOF_OMIT)
 //usage:#define pidof_trivial_usage
-//usage:       "[OPTIONS] [NAME]..."
+//usage:       IF_FEATURE_PIDOF_SINGLE("[-s] ")IF_FEATURE_PIDOF_OMIT("[-o PID] ")"[NAME]..."
 //usage:#define USAGE_PIDOF "\n"
 //usage:#else
 //usage:#define pidof_trivial_usage

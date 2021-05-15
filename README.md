@@ -1,23 +1,37 @@
 ### Status
 
-Things may work for you, or may not.  Things may never work because of huge differences between Linux and Windows.  Or things may work in future, if you report the problem to https://github.com/rmyorston/busybox-w32.  If you don't have a GitHub account you can email me: rmy@pobox.com.
+Things may work for you, or may not.  Things may never work because of huge differences between Linux and Windows.  Or things may work in future, if you report the problem on [GitHub](https://github.com/rmyorston/busybox-w32) or [GitLab](https://gitlab.com/rmyorston/busybox-w32).  If you don't have an account on one of those you can email me: [rmy@pobox.com](mailto:rmy@pobox.com).
 
 ### Building
 
-You need a MinGW compiler and a POSIX environment (so that `make menuconfig` works).  I cross-compile on Linux.  On Fedora or RHEL/CentOS+EPEL installing mingw32-gcc (32-bit build) or mingw64-gcc (64-bit build) will pull in everything needed.
+You need a MinGW compiler and a POSIX environment.  I cross-compile on Linux.  On Fedora the following should pull in everything required:
 
-To start, run `make mingw32_defconfig` or `make mingw64_defconfig`.  You can then customize your build with `make menuconfig`.
+`dnf install gcc make ncurses-devel perl-Pod-Html`
 
-In particular you may need to adjust the compiler by going to Busybox Settings -> Build Options -> Cross Compiler Prefix
+`dnf install mingw64-gcc mingw64-windows-default-manifest` (for a 64-bit build)
+
+`dnf install mingw32-gcc mingw32-windows-default-manifest` (for a 32-bit build)
+
+On Microsoft Windows you can install MSYS2 and a 64-bit toolchain by following [these instructions](https://www.msys2.org/#installation).  To obtain a 32-bit toolchain run:
+
+`pacman -S --needed mingw-w64-i686-toolchain`
+
+Run `mingw64.exe` or `mingw32.exe` from the installation directory.
+
+On either Linux or Windows the commands `make mingw64_defconfig` or `make mingw32_defconfig` will pick up the default configuration.  You can then customize your build with `make menuconfig` (Linux only) or by editing `.config`, if you know what you're doing.
 
 Then just `make`.
 
 ### Limitations
 
  - Use forward slashes in paths:  Windows doesn't mind and the shell will be happier.
- - Don't do wild things with Windows drive or UNC notation.
- - Wildcard expansion is disabled by default, though it can be turned on at compile time.  This only affects command line arguments to the binary:  the BusyBox shell has full support for wildcards.
+ - Windows paths are different from Unix ([more detail](https://frippery.org/busybox/paths.html)):
+   * Absolute paths: `c:/path` or `//host/share`
+   * Relative to current directory of other drive: `c:path`
+   * Relative to current root (drive or share): `/path`
+   * Relative to current directory of current root (drive or share): `path`
  - Handling of users, groups and permissions is totally bogus.  The system only admits to knowing about the current user and always returns the same hardcoded uid, gid and permission values.
  - Some crufty old Windows code (Windows XP, cmd.exe) doesn't like forward slashes in environment variables.  The -X shell option (which must be the first argument) prevents busybox-w32 from changing backslashes to forward slashes.  If Windows programs don't run from the shell it's worth trying it.
  - If you want to install 32-bit BusyBox in a system directory on a 64-bit version of Windows you should put it in `C:\Windows\SysWOW64`, not `C:\Windows\System32` as you might expect.  On 64-bit systems the latter is for 64-bit binaries.
  - ANSI escape sequences are emulated by converting to the equivalent in the Windows console API.  Setting the environment variable `BB_SKIP_ANSI_EMULATION` will cause ANSI escapes to be passed to the console without emulation.  This may be useful for Windows consoles that support ANSI escapes (e.g. ConEmu).
+ - It's possible to obtain pseudo-random numbers using `if=/dev/urandom` as the input file to `dd`.  The same emulation of `/dev/urandom` is used internally by the `shred` utility and to support https in `wget`.  Since the pseudo-random number generator isn't being seeded with sufficient entropy the randomness shouldn't be relied on for any serious use.

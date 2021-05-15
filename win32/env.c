@@ -1,19 +1,8 @@
 #include "libbb.h"
 
-static int lookup_env(char **env, const char *name, size_t nmln)
-{
-	int i;
-
-	for (i = 0; env[i]; i++) {
-		if (0 == strncmp(env[i], name, nmln)
-		    && '=' == env[i][nmln])
-			/* matches */
-			return i;
-	}
-	return -1;
-}
-
 #undef getenv
+#undef putenv
+
 char *mingw_getenv(const char *name)
 {
 	char *result = getenv(name);
@@ -29,150 +18,90 @@ char *mingw_getenv(const char *name)
 int setenv(const char *name, const char *value, int replace)
 {
 	int out;
-	size_t namelen, valuelen;
 	char *envstr;
 
-	if (!name || !value) return -1;
+	if (!name || !*name || strchr(name, '=') || !value) return -1;
 	if (!replace) {
-		char *oldval = NULL;
-		oldval = getenv(name);
-		if (oldval) return 0;
+		if (getenv(name)) return 0;
 	}
 
-	namelen = strlen(name);
-	valuelen = strlen(value);
-	envstr = malloc((namelen + valuelen + 2));
-	if (!envstr) return -1;
-
-	memcpy(envstr, name, namelen);
-	envstr[namelen] = '=';
-	memcpy(envstr + namelen + 1, value, valuelen);
-	envstr[namelen + valuelen + 1] = 0;
-
-	out = putenv(envstr);
-	/* putenv(3) makes the argument string part of the environment,
-	 * and changing that string modifies the environment --- which
-	 * means we do not own that storage anymore.  Do not free
-	 * envstr.
-	 */
+	envstr = xasprintf("%s=%s", name, value);
+	out = mingw_putenv(envstr);
+	free(envstr);
 
 	return out;
 }
 
 /*
- * If name contains '=', then sets the variable, otherwise it unsets it
- */
-char **env_setenv(char **env, const char *name)
-{
-	char *eq = strchrnul(name, '=');
-	int i = lookup_env(env, name, eq-name);
-
-	if (i < 0) {
-		if (*eq) {
-			for (i = 0; env[i]; i++)
-				;
-			env = xrealloc(env, (i+2)*sizeof(*env));
-			env[i] = xstrdup(name);
-			env[i+1] = NULL;
-		}
-	}
-	else {
-		free(env[i]);
-		if (*eq)
-			env[i] = xstrdup(name);
-		else {
-			for (; env[i]; i++)
-				env[i] = env[i+1];
-#if !ENABLE_SAFE_ENV
-			SetEnvironmentVariable(name, NULL);
-#endif
-		}
-	}
-	return env;
-}
-
-#if ENABLE_SAFE_ENV
-/*
- * Removing an environment variable with WIN32 putenv requires an argument
+ * Removing an environment variable with WIN32 _putenv requires an argument
  * like "NAME="; glibc omits the '='.  The implementations of unsetenv and
  * clearenv allow for this.
  *
  * It isn't possible to create an environment variable with an empty value
- * using WIN32 putenv.
+ * using WIN32 _putenv.
  */
-#undef putenv
-int unsetenv(const char *env)
+int unsetenv(const char *name)
 {
-	char *name;
+	char *envstr;
 	int ret;
 
-	name = xmalloc(strlen(env)+2);
-	strcat(strcpy(name, env), "=");
-	ret = putenv(name);
-	free(name);
+	if (!name || !*name || strchr(name, '=') ) {
+		return -1;
+	}
+
+	envstr = xasprintf("%s=", name);
+	ret = _putenv(envstr);
+	free(envstr);
 
 	return ret;
 }
 
 int clearenv(void)
 {
-	int ret = 0;
-	LPWSTR env, p;
-	WCHAR buf[32768];
+	char *envp, *name, *s;
 
-	p = env = GetEnvironmentStringsW();
-	while (p && *p) {
-		int len = wcslen(p);
-		LPWSTR equal = wcschr(p, L'=');
-
-		if (equal) {
-			wcsncpy(buf, p, equal - p);
-			buf[equal - p] = L'\0';
-			if (!SetEnvironmentVariableW(buf, NULL)) {
-				ret = -1;
-				break;
+	while ( environ && (envp=*environ) ) {
+		if ( (s=strchr(envp, '=')) != NULL ) {
+			name = xstrndup(envp, s-envp+1);
+			if (_putenv(name) == -1) {
+				free(name);
+				return -1;
 			}
+			free(name);
 		}
-		p += len + 1;
+		else {
+			return -1;
+		}
 	}
-
-	FreeEnvironmentStringsW(env);
-
-	return ret;
+	return 0;
 }
 
 int mingw_putenv(const char *env)
 {
-	char *s;
+	char *s, **envp;
+	int ret = 0;
 
 	if ( (s=strchr(env, '=')) == NULL ) {
 		return unsetenv(env);
 	}
 
-	if ( s[1] != '\0' ) {
-		return putenv(env);
+	if (s[1] != '\0') {
+		/* setting non-empty value is fine */
+		return _putenv(env);
+	}
+	else {
+		/* set empty value by setting a non-empty one then truncating */
+		char *envstr = xasprintf("%s0", env);
+		ret = _putenv(envstr);
+
+		for (envp = environ; *envp; ++envp) {
+			if (strcmp(*envp, envstr) == 0) {
+				(*envp)[s - env + 1] = '\0';
+				break;
+			}
+		}
+		free(envstr);
 	}
 
-	/* can't set empty value */
-	return 0;
+	return ret;
 }
-#else
-void unsetenv(const char *env)
-{
-	env_setenv(environ, env);
-}
-
-int clearenv(void)
-{
-	char **env = environ;
-	if (!env)
-		return 0;
-	while (*env) {
-		free(*env);
-		env++;
-	}
-	free(env);
-	environ = NULL;
-	return 0;
-}
-#endif

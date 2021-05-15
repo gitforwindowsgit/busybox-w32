@@ -5,7 +5,7 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config SHRED
-//config:	bool "shred (5 kb)"
+//config:	bool "shred (4.9 kb)"
 //config:	default y
 //config:	help
 //config:	Overwrite a file to hide its contents, and optionally delete it
@@ -57,9 +57,9 @@ int shred_main(int argc UNUSED_PARAM, char **argv)
 	opt = getopt32(argv, "fuzn:+vx", &num_iter);
 	argv += optind;
 
-	zero_fd = xopen("/dev/zero", O_RDONLY);
+	zero_fd = MINGW_SPECIAL(xopen)("/dev/zero", O_RDONLY);
 	if (num_iter != 0)
-		rand_fd = xopen("/dev/urandom", O_RDONLY);
+		rand_fd = MINGW_SPECIAL(xopen)("/dev/urandom", O_RDONLY);
 
 	if (!*argv)
 		bb_show_usage();
@@ -96,8 +96,14 @@ int shred_main(int argc UNUSED_PARAM, char **argv)
 			}
 			if (opt & OPT_u) {
 				ftruncate(fd, 0);
+#if ENABLE_PLATFORM_MINGW32
+				xclose(fd);
+#endif
 				xunlink(fname);
 			}
+#if ENABLE_PLATFORM_MINGW32
+			else
+#endif
 			xclose(fd);
 		}
 	}

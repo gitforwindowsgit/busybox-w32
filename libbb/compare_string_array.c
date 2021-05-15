@@ -27,11 +27,25 @@ char* FAST_FUNC is_prefixed_with(const char *string, const char *key)
 #endif
 }
 
+#if ENABLE_PLATFORM_MINGW32
+char* FAST_FUNC is_prefixed_with_case(const char *string, const char *key)
+{
+	while (*key != '\0') {
+		if (tolower(*key) != tolower(*string))
+			return NULL;
+		key++;
+		string++;
+	}
+	return (char*)string;
+}
+#endif
+
 /*
  * Return NULL if string is not suffixed with key. Return pointer to the
  * beginning of prefix key in string. If key is an empty string return pointer
  * to the end of string.
  */
+#if !ENABLE_PLATFORM_MINGW32
 char* FAST_FUNC is_suffixed_with(const char *string, const char *key)
 {
 	size_t key_len = strlen(key);
@@ -46,6 +60,33 @@ char* FAST_FUNC is_suffixed_with(const char *string, const char *key)
 
 	return NULL;
 }
+#else
+static char* FAST_FUNC is_suffixed(const char *string, const char *key,
+		int (*fn)(const char *, const char*))
+{
+	size_t key_len = strlen(key);
+	ssize_t len_diff = strlen(string) - key_len;
+
+	if (len_diff >= 0) {
+		string += len_diff;
+		if (fn(string, key) == 0) {
+			return (char*)string;
+		}
+	}
+
+	return NULL;
+}
+
+char* FAST_FUNC is_suffixed_with(const char *string, const char *key)
+{
+	return is_suffixed(string, key, strcmp);
+}
+
+char* FAST_FUNC is_suffixed_with_case(const char *string, const char *key)
+{
+	return is_suffixed(string, key, strcasecmp);
+}
+#endif
 
 /* returns the array index of the string */
 /* (index of first match is returned, or -1) */
@@ -63,13 +104,19 @@ int FAST_FUNC index_in_str_array(const char *const string_array[], const char *k
 
 int FAST_FUNC index_in_strings(const char *strings, const char *key)
 {
-	int idx = 0;
+	int j, idx = 0;
 
 	while (*strings) {
-		if (strcmp(strings, key) == 0) {
-			return idx;
+		/* Do we see "key\0" at current position in strings? */
+		for (j = 0; *strings == key[j]; ++j) {
+			if (*strings++ == '\0') {
+				//bb_error_msg("found:'%s' i:%u", key, idx);
+				return idx; /* yes */
+			}
 		}
-		strings += strlen(strings) + 1; /* skip NUL */
+		/* No.  Move to the start of the next string. */
+		while (*strings++ != '\0')
+			continue;
 		idx++;
 	}
 	return -1;
@@ -117,8 +164,11 @@ int FAST_FUNC index_in_substrings(const char *strings, const char *key)
 const char* FAST_FUNC nth_string(const char *strings, int n)
 {
 	while (n) {
-		n--;
-		strings += strlen(strings) + 1;
+		if (*strings++ == '\0') {
+			if (*strings == '\0') /* reached end of strings */
+				break;
+			n--;
+		}
 	}
 	return strings;
 }

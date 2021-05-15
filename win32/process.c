@@ -1,5 +1,7 @@
 #include "libbb.h"
 #include <tlhelp32.h>
+#include <psapi.h>
+#include "lazyload.h"
 
 #define WARGV_OOM ((void *)(intptr_t)-1ll)
 
@@ -38,8 +40,6 @@ static wchar_t **argv_to_wargv(char *const *argv, const char *prepend)
 	return wargv;
 }
 
-static int exit_process_by_handle(HANDLE process, int exit_code);
-
 static struct {
 	CRITICAL_SECTION mutex;
 	int nr, alloc;
@@ -53,7 +53,7 @@ static struct {
 static void kill_spawned_processes_on_signal(void)
 {
         DWORD status;
-	int i, signal;
+	int i;
 
 	/*
 	 * Only continue if the process was terminated by a signal, as
@@ -65,14 +65,12 @@ static void kill_spawned_processes_on_signal(void)
 	if (!GetExitCodeProcess(GetCurrentProcess(), &status) ||
 			status <= 128 || status > 128 + SIGRTMAX)
 		return;
-	signal = status - 128;
 
 	EnterCriticalSection(&spawned_processes.mutex);
 	for (i = 0; i < spawned_processes.nr; i++) {
 		if (GetExitCodeProcess(spawned_processes.h[i], &status) &&
 				status == STILL_ACTIVE)
-			exit_process_by_handle(spawned_processes.h[i],
-					       128 + signal);
+			kill_SIGTERM_by_handle(spawned_processes.h[i]);
 		CloseHandle(spawned_processes.h[i]);
 	}
 	spawned_processes.nr = 0;
@@ -127,13 +125,13 @@ void initialize_critical_sections(void)
 static intptr_t mingw_spawnve(int mode,
 		const char *cmd, char *const *argv, char *const *env)
 {
-	wchar_t *wcmd, **wargv, **wenv;
+	wchar_t wcmd[PATH_MAX], **wargv, **wenv;
 	intptr_t ret;
 
-	wcmd = mingw_pathconv(cmd);
 	wargv = argv_to_wargv(argv, NULL);
 	wenv = argv_to_wargv(env, NULL);
-	if (!wcmd || wargv == WARGV_OOM || wenv == WARGV_OOM) {
+	if (!MultiByteToWideChar(CP_ACP, 0, mingw_pathconv(cmd), -1, wcmd, PATH_MAX) ||
+	    wargv == WARGV_OOM || wenv == WARGV_OOM) {
 		errno = ENOMEM;
 		return -1;
 	}
@@ -155,23 +153,8 @@ static intptr_t mingw_spawnve(int mode,
 				return -1;
 			}
 		}
-		wcmd = mingw_pathconv(get_busybox_exec_path());
+		MultiByteToWideChar(CP_ACP, 0, get_busybox_exec_path(), -1, wcmd, PATH_MAX);
 	}
-
-	/*
-	 * It can be easily verified that _wspawnve() has no problems with a
-	 * wcmd that has the \\?\ prefix and it may be a long path.
-	 *
-	 * However, some programs inspect their own absolute path, e.g. to
-	 * infer the location of related files (think: git.exe and its exec
-	 * path), and not all of these programs handle a \\?\ prefix well, e.g.
-	 * MSYS2's gdb (MINGW version).
-	 *
-	 * So let's skip the prefix when possible (i.e. when the path fits
-	 * within PATH_MAX minus some wiggling room).
-	 */
-	if (!wcsncmp(wcmd, L"\\\\?\\", 4) && wcslen(wcmd) < PATH_MAX)
-		wcmd += 4;
 
 	/*
 	 * We cannot use _P_WAIT here because we need to kill spawned processes
@@ -193,7 +176,7 @@ static intptr_t mingw_spawnve(int mode,
 		DWORD exit_code;
 		WaitForSingleObject((HANDLE)ret, INFINITE);
 		if (!GetExitCodeProcess((HANDLE)ret, &exit_code)) {
-			errno = err_win_to_posix(GetLastError());
+			errno = err_win_to_posix();
 			CloseHandle((HANDLE)ret);
 			return -1;
 		}
@@ -205,81 +188,108 @@ static intptr_t mingw_spawnve(int mode,
 	}
 }
 
-int waitpid(pid_t pid, int *status, int options)
+pid_t waitpid(pid_t pid, int *status, int options)
+#if ENABLE_TIME
+{
+	return mingw_wait3(pid, status, options, NULL);
+}
+#endif
+
+#if ENABLE_TIME
+pid_t mingw_wait3(pid_t pid, int *status, int options, struct rusage *rusage)
+#endif
 {
 	HANDLE proc;
-	intptr_t ret;
+	DWORD code;
 
 	/* Windows does not understand parent-child */
 	if (pid > 0 && options == 0) {
 		if ( (proc=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_INFORMATION,
 						FALSE, pid)) != NULL ) {
-			ret = _cwait(status, (intptr_t)proc, 0);
+			WaitForSingleObject(proc, INFINITE);
+			GetExitCodeProcess(proc, &code);
+#if ENABLE_TIME
+			if (rusage != NULL) {
+				FILETIME crTime, exTime, keTime, usTime;
+
+				memset(rusage, 0, sizeof(*rusage));
+				if (GetProcessTimes(proc, &crTime, &exTime, &keTime, &usTime)) {
+					uint64_t kernel_usec =
+						(((uint64_t)keTime.dwHighDateTime << 32)
+							| (uint64_t)keTime.dwLowDateTime)/10;
+					uint64_t user_usec =
+						(((uint64_t)usTime.dwHighDateTime << 32)
+							| (uint64_t)usTime.dwLowDateTime)/10;
+
+					rusage->ru_utime.tv_sec = user_usec / 1000000U;
+					rusage->ru_utime.tv_usec = user_usec % 1000000U;
+					rusage->ru_stime.tv_sec = kernel_usec / 1000000U;
+					rusage->ru_stime.tv_usec = kernel_usec % 1000000U;
+				}
+			}
+#endif
 			CloseHandle(proc);
-			return ret == -1 ? -1 : pid;
+			*status = code << 8;
+			return pid;
 		}
 	}
 	errno = pid < 0 ? ENOSYS : EINVAL;
 	return -1;
 }
 
-const char *
-next_path_sep(const char *path)
-{
-	static const char *from = NULL, *to;
-	static int has_semicolon;
-	int len = strlen(path);
+typedef struct {
+	char *path;
+	char *name;
+	char *opts;
+	char buf[100];
+} interp_t;
 
-	if (!from || !(path >= from && path+len <= to)) {
-		from = path;
-		to = from+len;
-		has_semicolon = strchr(path, ';') != NULL;
+static int
+parse_interpreter(const char *cmd, interp_t *interp)
+{
+	char *path, *t;
+	int n;
+
+	while (TRUE) {
+		n = open_read_close(cmd, interp->buf, sizeof(interp->buf)-1);
+		if (n < 4)	/* at least '#!/x' and not error */
+			break;
+
+		/*
+		 * See http://www.in-ulm.de/~mascheck/various/shebang/ for trivia
+		 * relating to '#!'.
+		 */
+		if (interp->buf[0] != '#' || interp->buf[1] != '!')
+			break;
+		interp->buf[n] = '\0';
+		if ((t=strchr(interp->buf, '\n')) == NULL)
+			break;
+		t[1] = '\0';
+
+		if ((path=strtok(interp->buf+2, " \t\r\n")) == NULL)
+			break;
+
+		t = (char *)bb_basename(path);
+		if (*t == '\0')
+			break;
+
+		interp->path = path;
+		interp->name = t;
+		interp->opts = strtok(NULL, "\r\n");
+		/* Trim leading and trailing whitespace from the options.
+		 * If the resulting string is empty return a NULL pointer. */
+		if (interp->opts && trim(interp->opts) == interp->opts)
+			interp->opts = NULL;
+		return 1;
 	}
 
-	/* Semicolons take precedence, it's Windows PATH */
-	if (has_semicolon)
-		return strchr(path, ';');
-	/* PATH=C:, not really a separator */
-	return strchr(has_dos_drive_prefix(path) ? path+2 : path, ':');
-}
-
-static char *
-parse_interpreter(const char *cmd, char **name, char **opts)
-{
-	static char buf[100];
-	char *path, *t;
-	int n, fd;
-
-	fd = open(cmd, O_RDONLY);
-	if (fd < 0)
-		return NULL;
-	n = read(fd, buf, sizeof(buf)-1);
-	close(fd);
-	if (n < 4)	/* at least '#!/x' and not error */
-		return NULL;
-
-	/*
-	 * See http://www.in-ulm.de/~mascheck/various/shebang/ for trivia
-	 * relating to '#!'.
-	 */
-	if (buf[0] != '#' || buf[1] != '!')
-		return NULL;
-	buf[n] = '\0';
-	if ((t=strchr(buf, '\n')) == NULL)
-		return NULL;
-	t[1] = '\0';
-
-	if ((path=strtok(buf+2, " \t\r\n")) == NULL)
-		return NULL;
-
-	t = (char *)bb_basename(path);
-	if (*t == '\0')
-		return NULL;
-
-	*name = t;
-	*opts = strtok(NULL, "\r\n");
-
-	return path;
+	if (n >= 0 && is_suffixed_with_case(cmd, ".sh")) {
+		interp->path = (char *)DEFAULT_SHELL;
+		interp->name = (char *)DEFAULT_SHELL_SHORT_NAME;
+		interp->opts = NULL;
+		return 1;
+	}
+	return 0;
 }
 
 static char *quote_arg_msys2(const char *arg)
@@ -313,7 +323,7 @@ static char *quote_arg_msys2(const char *arg)
 }
 
 /*
- * See http://msdn2.microsoft.com/en-us/library/17w5ykft(vs.71).aspx
+ * See https://docs.microsoft.com/en-us/cpp/cpp/main-function-command-line-args?view=vs-2019#parsing-c-command-line-arguments
  * (Parsing C++ Command-Line Arguments)
  */
 static char *
@@ -445,25 +455,66 @@ static intptr_t
 spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 {
 	char **new_argv;
-	int i, argc = -1;
+	char *new_path = NULL;
+	int i, argc;
 	intptr_t ret;
+	struct stat st;
+
 	char *(*quote_arg)(const char *);
-
 	quote_arg = is_msys2_cmd(path) ? quote_arg_msys2 : quote_arg_mingw;
-	while (argv[++argc])
-		;
 
-	new_argv = xmalloc(sizeof(*argv)*(argc+1));
+	path = mingw_pathconv(path);
+
+	/*
+	 * Require that the file exists, is a regular file and is executable.
+	 * It may still contain garbage but we let spawnve deal with that.
+	 */
+	if (stat(path, &st) == 0) {
+		if (!S_ISREG(st.st_mode) || !(st.st_mode&S_IXUSR)) {
+			errno = EACCES;
+			return -1;
+		}
+	}
+	else {
+		return -1;
+	}
+
+	argc = string_array_len((char **)argv);
+	new_argv = xzalloc(sizeof(*argv)*(argc+1));
 	for (i = 0;i < argc;i++)
 		new_argv[i] = quote_arg(argv[i]);
-	new_argv[argc] = NULL;
 
-	ret = mingw_spawnve(mode, path, new_argv, env);
+	/* Special case:  spawnve won't execute a batch file if the first
+	 * argument is a relative path containing forward slashes.  Absolute
+	 * paths are fine but there's no harm in converting them too. */
+	if (has_bat_suffix(path)) {
+		slash_to_bs(new_argv[0]);
 
+		/* Another special case:  spawnve returns ENOEXEC when passed an
+		 * empty batch file.  Pretend it worked. */
+		if (st.st_size == 0) {
+			ret = 0;
+			goto done;
+		}
+	}
+
+	/*
+	 * Another special case:  if a file doesn't have an extension add
+	 * a '.' at the end.  This forces spawnve to use precisely the
+	 * file specified without trying to add an extension.
+	 */
+	if (!strchr(bb_basename(path), '.')) {
+		new_path = xasprintf("%s.", path);
+	}
+
+	ret = mingw_spawnve(mode, new_path ? new_path : path, new_argv, env);
+
+ done:
 	for (i = 0;i < argc;i++)
 		if (new_argv[i] != argv[i])
 			free(new_argv[i]);
 	free(new_argv);
+	free(new_path);
 
 	return ret;
 }
@@ -479,44 +530,44 @@ mingw_spawn_applet(int mode,
 #endif
 
 static intptr_t
-mingw_spawn_interpreter(int mode, const char *prog, char *const *argv, char *const *envp)
+mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
+			char *const *envp, int level)
 {
 	intptr_t ret;
 	int nopts;
-	char *int_name, *opts;
-	char *int_path = parse_interpreter(prog, &int_name, &opts);
+	interp_t interp;
 	char **new_argv;
-	int argc = -1;
+	int argc;
 	char *fullpath = NULL;
 
-	if (!int_path)
+	if (!parse_interpreter(prog, &interp))
 		return spawnveq(mode, prog, argv, envp);
 
-	nopts = opts != NULL;
-	while (argv[++argc])
-		;
+	if (++level > 4) {
+		errno = ELOOP;
+		return -1;
+	}
 
+	nopts = interp.opts != NULL;
+	argc = string_array_len((char **)argv);
 	new_argv = xmalloc(sizeof(*argv)*(argc+nopts+2));
-	new_argv[1] = opts;
+	new_argv[1] = interp.opts;
 	new_argv[nopts+1] = (char *)prog; /* pass absolute path */
 	memcpy(new_argv+nopts+2, argv+1, sizeof(*argv)*argc);
 
-	if (file_is_executable(int_path) ||
-			(fullpath=file_is_win32_executable(int_path)) != NULL) {
-		new_argv[0] = fullpath ? fullpath : int_path;
-		ret = spawnveq(mode, new_argv[0], new_argv, envp);
+	fullpath = alloc_system_drive(interp.path);
+	if (add_win32_extension(fullpath) || file_is_executable(fullpath)) {
+		new_argv[0] = fullpath;
+		ret = mingw_spawn_interpreter(mode, new_argv[0], new_argv, envp, level);
 	} else
 #if ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE
-	if (find_applet_by_name(int_name) >= 0) {
-		new_argv[0] = int_name;
+	if (find_applet_by_name(interp.name) >= 0) {
+		/* the fake path indicates the index of the script */
+		new_argv[0] = fullpath = xasprintf("%d:/%s", nopts+1, interp.name);
 		ret = mingw_spawn_applet(mode, new_argv, envp);
 	} else
 #endif
-	if ((fullpath=find_first_executable(int_name)) != NULL) {
-		new_argv[0] = fullpath;
-		ret = spawnveq(mode, fullpath, new_argv, envp);
-	}
-	else {
+	{
 		errno = ENOENT;
 		ret = -1;
 	}
@@ -530,17 +581,28 @@ static intptr_t
 mingw_spawn_1(int mode, const char *cmd, char *const *argv, char *const *envp)
 {
 	char *prog;
+	intptr_t ret;
 
 #if ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE
 	if (find_applet_by_name(cmd) >= 0)
 		return mingw_spawn_applet(mode, argv, envp);
 	else
 #endif
-	if (strchr(cmd, '/') || strchr(cmd, '\\')) {
-		return mingw_spawn_interpreter(mode, cmd, argv, envp);
+	if (has_path(cmd)) {
+		char *path = alloc_system_drive(cmd);
+		add_win32_extension(path);
+		ret = mingw_spawn_interpreter(mode, path, argv, envp, 0);
+		free(path);
+#if ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE
+		if (ret == -1 && unix_path(cmd) &&
+				find_applet_by_name(bb_basename(cmd)) >= 0) {
+			return mingw_spawn_applet(mode, argv, envp);
+		}
+#endif
+		return ret;
 	}
 	else if ((prog=find_first_executable(cmd)) != NULL) {
-		intptr_t ret = mingw_spawn_interpreter(mode, prog, argv, envp);
+		ret = mingw_spawn_interpreter(mode, prog, argv, envp, 0);
 		free(prog);
 		return ret;
 	}
@@ -549,14 +611,26 @@ mingw_spawn_1(int mode, const char *cmd, char *const *argv, char *const *envp)
 	return -1;
 }
 
-pid_t FAST_FUNC
-mingw_spawn(char **argv)
+static pid_t
+mingw_spawn_pid(int mode, char **argv)
 {
 	intptr_t ret;
 
-	ret = mingw_spawn_1(P_NOWAIT, argv[0], (char *const *)argv, environ);
+	ret = mingw_spawn_1(mode, argv[0], (char *const *)argv, environ);
 
-	return ret == -1 ? -1 : GetProcessId((HANDLE)ret);
+	return ret == -1 ? (pid_t)-1 : (pid_t)GetProcessId((HANDLE)ret);
+}
+
+pid_t FAST_FUNC
+mingw_spawn(char **argv)
+{
+	return mingw_spawn_pid(P_NOWAIT, argv);
+}
+
+pid_t FAST_FUNC
+mingw_spawn_detach(char **argv)
+{
+	return mingw_spawn_pid(P_DETACH, argv);
 }
 
 intptr_t FAST_FUNC
@@ -577,7 +651,7 @@ mingw_execvp(const char *cmd, char *const *argv)
 int
 mingw_execve(const char *cmd, char *const *argv, char *const *envp)
 {
-	int ret = (int)mingw_spawn_interpreter(P_WAIT, cmd, argv, envp);
+	int ret = (int)mingw_spawn_interpreter(P_WAIT, cmd, argv, envp, 0);
 	if (ret != -1)
 		exit(ret);
 	return ret;
@@ -595,6 +669,94 @@ static inline long long filetime_to_ticks(const FILETIME *ft)
 				HNSEC_PER_TICK;
 }
 
+/*
+ * Attempt to get a string from another instance of busybox.exe.
+ * This will only work if the other process is using the same binary
+ * as the current process.  If anything goes wrong just give up.
+ */
+static char *get_bb_string(DWORD pid, const char *exe, char *string)
+{
+	HANDLE proc;
+	HMODULE mlist[32];
+	DWORD needed;
+	void *address;
+	char *my_base;
+	char buffer[128];
+	char exepath[PATH_MAX];
+	char *name = NULL;
+	int i;
+	DECLARE_PROC_ADDR(DWORD, GetProcessImageFileNameA, HANDLE,
+							LPSTR, DWORD);
+	DECLARE_PROC_ADDR(BOOL, EnumProcessModules, HANDLE, HMODULE *,
+							DWORD, LPDWORD);
+	DECLARE_PROC_ADDR(DWORD, GetModuleFileNameExA, HANDLE, HMODULE,
+							LPSTR, DWORD);
+
+	if (!INIT_PROC_ADDR(psapi.dll, GetProcessImageFileNameA) ||
+			!INIT_PROC_ADDR(psapi.dll, EnumProcessModules) ||
+			!INIT_PROC_ADDR(psapi.dll, GetModuleFileNameExA))
+		return NULL;
+
+	if (!(proc=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,
+							FALSE, pid))) {
+		return NULL;
+	}
+
+	if (exe == NULL) {
+		if (GetProcessImageFileNameA(proc, exepath, PATH_MAX) != 0) {
+			exe = bb_basename(exepath);
+		}
+	}
+
+	/*
+	 * Search for the module that matches the name of the executable.
+	 * The values returned in mlist are actually the base address of
+	 * the module in the other process (as noted in the documentation
+	 * for the MODULEINFO structure).
+	 */
+	if (!EnumProcessModules(proc, mlist, sizeof(mlist), &needed)) {
+		goto finish;
+	}
+
+	for (i=0; exe != NULL && i<needed/sizeof(HMODULE); ++i) {
+		char modname[MAX_PATH];
+		if (GetModuleFileNameExA(proc, mlist[i], modname, sizeof(modname))) {
+			if (strcasecmp(bb_basename(modname), exe) == 0) {
+				break;
+			}
+		}
+	}
+
+	if (i == needed/sizeof(HMODULE)) {
+		goto finish;
+	}
+
+	/* attempt to read the BusyBox version string */
+	my_base = (char *)GetModuleHandle(NULL);
+	address = (char *)mlist[i] + ((char *)bb_banner - my_base);
+	if (!ReadProcessMemory(proc, address, buffer, 128, NULL)) {
+		goto finish;
+	}
+
+	if (memcmp(buffer, bb_banner, strlen(bb_banner)) != 0) {
+		/* version mismatch (or not BusyBox at all) */
+		goto finish;
+	}
+
+	/* attempt to read the required string */
+	address = (char *)mlist[i] + ((char *)string - my_base);
+	if (!ReadProcessMemory(proc, address, buffer, 128, NULL)) {
+		goto finish;
+	}
+
+	buffer[127] = '\0';
+	name = auto_string(xstrdup(buffer));
+
+ finish:
+	CloseHandle(proc);
+	return name;
+}
+
 /* POSIX version in libbb/procps.c */
 procps_status_t* FAST_FUNC procps_scan(procps_status_t* sp, int flags
 #if !ENABLE_FEATURE_PS_TIME && !ENABLE_FEATURE_PS_LONG
@@ -603,6 +765,9 @@ UNUSED_PARAM
 )
 {
 	PROCESSENTRY32 pe;
+	HANDLE proc;
+	const char *comm, *name;
+	BOOL ret;
 
 	pe.dwSize = sizeof(pe);
 	if (!sp) {
@@ -612,59 +777,85 @@ UNUSED_PARAM
 			free(sp);
 			return NULL;
 		}
-		if (!Process32First(sp->snapshot, &pe)) {
-			CloseHandle(sp->snapshot);
-			free(sp);
-			return NULL;
-		}
+		ret = Process32First(sp->snapshot, &pe);
 	}
 	else {
-		if (!Process32Next(sp->snapshot, &pe)) {
-			CloseHandle(sp->snapshot);
-			free(sp);
-			return NULL;
-		}
+		ret = Process32Next(sp->snapshot, &pe);
 	}
+
+	if (!ret) {
+		CloseHandle(sp->snapshot);
+		free(sp);
+		return NULL;
+	}
+
+	memset(&sp->vsz, 0, sizeof(*sp) - offsetof(procps_status_t, vsz));
+#if !ENABLE_DESKTOP
+	strcpy(sp->state, "   ");
+#endif
 
 #if ENABLE_FEATURE_PS_TIME || ENABLE_FEATURE_PS_LONG
 	if (flags & (PSSCAN_STIME|PSSCAN_UTIME|PSSCAN_START_TIME)) {
-		HANDLE proc;
 		FILETIME crTime, exTime, keTime, usTime;
 
 		if ((proc=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
 					FALSE, pe.th32ProcessID))) {
 			if (GetProcessTimes(proc, &crTime, &exTime, &keTime, &usTime)) {
-				/* times in ticks since 1 January 1601 */
-				static long long boot_time = 0;
-				long long start_time;
+				long long ticks_since_boot, boot_time, create_time;
+				FILETIME now;
 
-				if (boot_time == 0) {
-					long long ticks_since_boot;
-					FILETIME now;
+				ticks_since_boot = GetTickCount64()/MS_PER_TICK;
+				GetSystemTimeAsFileTime(&now);
+				boot_time = filetime_to_ticks(&now) - ticks_since_boot;
+				create_time = filetime_to_ticks(&crTime);
 
-					ticks_since_boot = GetTickCount64()/MS_PER_TICK;
-					GetSystemTimeAsFileTime(&now);
-					boot_time = filetime_to_ticks(&now) - ticks_since_boot;
-				}
-
-				start_time = filetime_to_ticks(&crTime);
-				sp->start_time = (unsigned long)(start_time - boot_time);
-
+				sp->start_time = (unsigned long)(create_time - boot_time);
 				sp->stime = (unsigned long)filetime_to_ticks(&keTime);
 				sp->utime = (unsigned long)filetime_to_ticks(&usTime);
-			}
-			else {
-				sp->start_time = sp->stime = sp->utime = 0;
 			}
 			CloseHandle(proc);
 		}
 	}
 #endif
 
+	if (flags & PSSCAN_UIDGID) {
+		/* if we can open the process it belongs to us */
+		if ((proc=OpenProcess(PROCESS_ALL_ACCESS, FALSE, pe.th32ProcessID))) {
+			sp->uid = DEFAULT_UID;
+			sp->gid = DEFAULT_GID;
+			CloseHandle(proc);
+		}
+	}
+
 	sp->pid = pe.th32ProcessID;
 	sp->ppid = pe.th32ParentProcessID;
-	safe_strncpy(sp->comm, pe.szExeFile, COMM_LEN);
+
+	if (sp->pid == GetProcessId(GetCurrentProcess())) {
+		comm = applet_name;
+	}
+	else if ((name=get_bb_string(sp->pid, pe.szExeFile, bb_comm)) != NULL) {
+		comm = name;
+	}
+	else {
+		comm = pe.szExeFile;
+	}
+	safe_strncpy(sp->comm, comm, COMM_LEN);
+
 	return sp;
+}
+
+void FAST_FUNC read_cmdline(char *buf, int col, unsigned pid, const char *comm)
+{
+	const char *str, *cmdline;
+
+	*buf = '\0';
+	if (pid == GetProcessId(GetCurrentProcess()))
+		cmdline = bb_command_line;
+	else if ((str=get_bb_string(pid, NULL, bb_command_line)) != NULL)
+		cmdline = str;
+	else
+		cmdline = comm;
+	safe_strncpy(buf, cmdline, col);
 }
 
 /**
@@ -673,9 +864,9 @@ UNUSED_PARAM
  * of the indicated process.  Zero indicates the current process; negative
  * indicates the process with process ID -pid.
  */
-typedef int (*kill_callback)(pid_t pid, int exit_code);
+typedef int (*kill_callback)(pid_t pid, int sig);
 
-static int kill_pids(pid_t pid, int exit_code, kill_callback killer)
+static int kill_pids(pid_t pid, int sig, kill_callback killer)
 {
 	DWORD pids[16384];
 	int max_len = sizeof(pids) / sizeof(*pids), i, len, ret = 0;
@@ -701,7 +892,7 @@ static int kill_pids(pid_t pid, int exit_code, kill_callback killer)
 		HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 
 		if (snapshot == INVALID_HANDLE_VALUE) {
-			errno = err_win_to_posix(GetLastError());
+			errno = err_win_to_posix();
 			return -1;
 		}
 
@@ -732,8 +923,9 @@ static int kill_pids(pid_t pid, int exit_code, kill_callback killer)
 	}
 
 	for (i = len - 1; i >= 0; i--) {
-		if (killer(pids[i], exit_code)) {
-			errno = err_win_to_posix(GetLastError());
+		SetLastError(0);
+		if (killer(pids[i], sig)) {
+			errno = err_win_to_posix();
 			ret = -1;
 		}
 	}
@@ -773,39 +965,27 @@ static inline int process_architecture_matches_current(HANDLE process)
  * http://www.drdobbs.com/a-safer-alternative-to-terminateprocess/184416547
  *
  */
-static int exit_process_by_handle(HANDLE process, int exit_code)
+int kill_SIGTERM_by_handle(HANDLE process)
 {
 	DWORD code;
 	int ret = 0;
 
 	cull_exited_processes();
 	if (GetExitCodeProcess(process, &code) && code == STILL_ACTIVE) {
-		static int initialized;
-		static LPTHREAD_START_ROUTINE exit_process_address;
-		PVOID arg = (PVOID)(intptr_t)exit_code;
+		DECLARE_PROC_ADDR(DWORD, ExitProcess, LPVOID);
+		PVOID arg = (PVOID)(intptr_t)(128 + SIGTERM);
 		DWORD thread_id;
 		HANDLE thread;
 
-		if (!initialized) {
-			HINSTANCE kernel32 = GetModuleHandle("kernel32");
-			if (!kernel32) {
-				fprintf(stderr, "BUG: cannot find kernel32");
-				ret = -1;
-				goto finish;
-			}
-			exit_process_address = (LPTHREAD_START_ROUTINE)
-				GetProcAddress(kernel32, "ExitProcess");
-			initialized = 1;
-		}
-		if (!exit_process_address ||
-		    !process_architecture_matches_current(process)) {
+		if (!INIT_PROC_ADDR(kernel32, ExitProcess) ||
+				!process_architecture_matches_current(process)) {
+			SetLastError(ERROR_ACCESS_DENIED);
 			ret = -1;
 			goto finish;
 		}
 
 		if ((thread = CreateRemoteThread(process, NULL, 0,
-					    exit_process_address,
-					    arg, 0, &thread_id))) {
+					    ExitProcess, arg, 0, &thread_id))) {
 			CloseHandle(thread);
 		}
 	}
@@ -815,7 +995,7 @@ static int exit_process_by_handle(HANDLE process, int exit_code)
 	return ret;
 }
 
-static int exit_process(pid_t pid, int exit_code)
+static int kill_SIGTERM(pid_t pid, int sig UNUSED_PARAM)
 {
 	HANDLE process;
 
@@ -826,52 +1006,38 @@ static int exit_process(pid_t pid, int exit_code)
 		return -1;
 	}
 
-	return exit_process_by_handle(process, exit_code);
+	return kill_SIGTERM_by_handle(process);
 }
 
 /*
  * This way of terminating processes is not gentle: they get no chance to
  * clean up after themselves (closing file handles, removing .lock files,
  * terminating spawned processes (if any), etc).
+ *
+ * If the signal isn't SIGKILL just check if the target process exists.
  */
-static int terminate_process(pid_t pid, int exit_code)
+static int kill_SIGKILL(pid_t pid, int sig)
 {
 	HANDLE process;
-	int ret;
+	int ret = 0;
 
 	if (!(process=OpenProcess(PROCESS_TERMINATE, FALSE, pid))) {
 		return -1;
 	}
 
-	ret = !TerminateProcess(process, exit_code);
+	if (sig == SIGKILL)
+		ret = !TerminateProcess(process, 128 + SIGKILL);
 	CloseHandle(process);
 
 	return ret;
 }
 
-static int test_process(pid_t pid, int exit_code UNUSED_PARAM)
-{
-	HANDLE process;
-
-	if (!(process=OpenProcess(PROCESS_TERMINATE, FALSE, pid))) {
-		return -1;
-	}
-
-	CloseHandle(process);
-	return 0;
-}
-
 int kill(pid_t pid, int sig)
 {
-	if (sig == SIGTERM) {
-		return kill_pids(pid, 128+sig, exit_process);
-	}
-	else if (sig == SIGKILL) {
-		return kill_pids(pid, 128+sig, terminate_process);
-	}
-	else if (sig == 0) {
-		return kill_pids(pid, 128+sig, test_process);
-	}
+	if (sig == SIGTERM)
+		return kill_pids(pid, sig, kill_SIGTERM);
+	else if (sig == SIGKILL || sig == 0)
+		return kill_pids(pid, sig, kill_SIGKILL);
 
 	errno = EINVAL;
 	return -1;

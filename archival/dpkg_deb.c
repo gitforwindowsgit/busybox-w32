@@ -5,7 +5,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config DPKG_DEB
-//config:	bool "dpkg_deb"
+//config:	bool "dpkg-deb (30 kb)"
 //config:	default y
 //config:	select FEATURE_SEAMLESS_GZ
 //config:	help
@@ -28,7 +28,7 @@
 //usage:     "\n	-f	Print control fields"
 //usage:     "\n	-e	Extract control files to DIR (default: ./DEBIAN)"
 //usage:     "\n	-x	Extract files to DIR (no default)"
-//usage:     "\n	-X	Verbose -x"
+//usage:     "\n	-X	Verbose extract"
 //usage:
 //usage:#define dpkg_deb_example_usage
 //usage:       "$ dpkg-deb -X ./busybox_0.48-1_i386.deb /tmp\n"

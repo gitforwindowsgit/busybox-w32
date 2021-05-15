@@ -334,7 +334,9 @@ int conf_write(const char *name)
 	struct symbol *sym;
 	struct menu *menu;
 	const char *basename;
-	char dirname[128], tmpname[128], newname[128];
+	char dirname[128];
+	char tmpname[256];
+	char newname[256];
 	int type, l;
 	const char *str;
 	time_t now;
@@ -364,7 +366,7 @@ int conf_write(const char *name)
 		basename = conf_def_filename;
 
 	sprintf(newname, "%s.tmpconfig.%d", dirname, (int)getpid());
-	out = fopen(newname, "w");
+	out = fopen(newname, "wb");
 	if (!out)
 		return 1;
 	out_h = NULL;

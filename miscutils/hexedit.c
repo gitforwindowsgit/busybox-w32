@@ -4,7 +4,7 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 //config:config HEXEDIT
-//config:	bool "hexedit"
+//config:	bool "hexedit (21 kb)"
 //config:	default y
 //config:	help
 //config:	Edit file in hexadecimal.
@@ -31,7 +31,8 @@ struct globals {
 	int fd;
 	unsigned height;
 	unsigned row;
-	unsigned pagesize;
+	IF_VARIABLE_ARCH_PAGESIZE(unsigned pagesize;)
+#define G_pagesize cached_pagesize(G.pagesize)
 	uint8_t *baseaddr;
 	uint8_t *current_byte;
 	uint8_t *eof_byte;
@@ -45,15 +46,6 @@ struct globals {
 #define INIT_G() do { \
 	SET_PTR_TO_GLOBALS(xzalloc(sizeof(G))); \
 } while (0)
-
-//TODO: move to libbb
-#if defined(__x86_64__) || defined(i386)
-# define G_pagesize 4096
-# define INIT_PAGESIZE() ((void)0)
-#else
-# define G_pagesize (G.pagesize)
-# define INIT_PAGESIZE() ((void)(G.pagesize = getpagesize()))
-#endif
 
 /* hopefully there aren't arches with PAGE_SIZE > 64k */
 #define G_mapsize  (64*1024)
@@ -153,7 +145,8 @@ static void redraw(unsigned cursor)
 		i++;
 	}
 
-	printf(ESC"[%u;%uH", 1 + cursor / 16, 1 + pos + (cursor & 0xf) * 3);
+	G.row = cursor / 16;
+	printf(ESC"[%u;%uH", 1 + G.row, 1 + pos + (cursor & 0xf) * 3);
 }
 
 static void redraw_cur_line(void)
@@ -192,7 +185,7 @@ static int remap(unsigned cur_pos)
 	);
 	if (G.baseaddr == MAP_FAILED) {
 		restore_term();
-		bb_perror_msg_and_die("mmap");
+		bb_simple_perror_msg_and_die("mmap");
 	}
 
 	G.current_byte = G.baseaddr + cur_pos;
@@ -261,7 +254,7 @@ int hexedit_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int hexedit_main(int argc UNUSED_PARAM, char **argv)
 {
 	INIT_G();
-	INIT_PAGESIZE();
+	INIT_PAGESIZE(G.pagesize);
 
 	get_terminal_width_height(-1, NULL, &G.height);
 	if (1) {
@@ -367,6 +360,8 @@ int hexedit_main(int argc UNUSED_PARAM, char **argv)
 				if (G.current_byte > G.eof_byte) {
 					/* _after_ eof - don't allow this */
 					G.current_byte -= 16;
+					if (G.current_byte < G.baseaddr)
+						move_mapping_lower();
 					break;
 				}
 			}

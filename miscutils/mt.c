@@ -3,7 +3,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config MT
-//config:	bool "mt (2.6 kb)"
+//config:	bool "mt (2.5 kb)"
 //config:	default y
 //config:	help
 //config:	mt is used to control tape devices. You can use the mt utility
@@ -15,7 +15,7 @@
 //kbuild:lib-$(CONFIG_MT) += mt.o
 
 //usage:#define mt_trivial_usage
-//usage:       "[-f device] opcode value"
+//usage:       "[-f DEVICE] OPCODE VALUE"
 //usage:#define mt_full_usage "\n\n"
 //usage:       "Control magnetic tape drive operation\n"
 //usage:       "\n"
@@ -30,7 +30,7 @@
 #include <sys/mtio.h>
 
 /* missing: eod/seod, stoptions, stwrthreshold, densities */
-static const short opcode_value[] = {
+static const short opcode_value[] ALIGN2 = {
 	MTBSF,
 	MTBSFM,
 	MTBSR,

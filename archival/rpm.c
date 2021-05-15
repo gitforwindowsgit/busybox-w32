@@ -7,7 +7,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config RPM
-//config:	bool "rpm (33 kb)"
+//config:	bool "rpm (32 kb)"
 //config:	default y
 //config:	help
 //config:	Mini RPM applet - queries and extracts RPM packages.
@@ -83,7 +83,9 @@ struct globals {
 	void *map;
 	rpm_index *mytags;
 	int tagcount;
-	unsigned mapsize, pagesize;
+	unsigned mapsize;
+	IF_VARIABLE_ARCH_PAGESIZE(unsigned pagesize;)
+#define G_pagesize cached_pagesize(G.pagesize)
 } FIX_ALIASING;
 #define G (*(struct globals*)bb_common_bufsiz1)
 #define INIT_G() do { setup_common_bufsiz(); } while (0)
@@ -142,11 +144,11 @@ static int rpm_gettags(const char *filename)
 
 #if !ENABLE_PLATFORM_MINGW32
 	/* Map the store */
-	storepos = (storepos + G.pagesize) & -(int)G.pagesize;
+	storepos = (storepos + G_pagesize) & -(int)G_pagesize;
 	/* remember size for munmap */
 	G.mapsize = storepos;
 	/* some NOMMU systems prefer MAP_PRIVATE over MAP_SHARED */
-	G.map = mmap(0, storepos, PROT_READ, MAP_PRIVATE, fd, 0);
+	G.map = mmap_read(fd, storepos);
 	if (G.map == MAP_FAILED)
 		bb_perror_msg_and_die("mmap '%s'", filename);
 #else
@@ -303,6 +305,9 @@ static void extract_cpio(int fd, const char *source_rpm)
 
 	if (source_rpm != NULL) {
 		/* Binary rpm (it was built from some SRPM), install to root */
+#if ENABLE_PLATFORM_MINGW32
+		if (chdir_system_drive())
+#endif
 		xchdir("/");
 	} /* else: SRPM, install to current dir */
 
@@ -365,7 +370,7 @@ int rpm_main(int argc, char **argv)
 	int opt, func = 0;
 
 	INIT_G();
-	G.pagesize = getpagesize();
+	INIT_PAGESIZE(G.pagesize);
 
 	while ((opt = getopt(argc, argv, "iqpldc")) != -1) {
 		switch (opt) {
@@ -508,7 +513,7 @@ int rpm_main(int argc, char **argv)
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config RPM2CPIO
-//config:	bool "rpm2cpio (20 kb)"
+//config:	bool "rpm2cpio (21 kb)"
 //config:	default y
 //config:	help
 //config:	Converts a RPM file into a CPIO archive.
@@ -532,7 +537,7 @@ int rpm2cpio_main(int argc UNUSED_PARAM, char **argv)
 	int rpm_fd;
 
 	INIT_G();
-	G.pagesize = getpagesize();
+	INIT_PAGESIZE(G.pagesize);
 
 	rpm_fd = rpm_gettags(argv[1]);
 
@@ -552,7 +557,7 @@ int rpm2cpio_main(int argc UNUSED_PARAM, char **argv)
 	}
 
 	if (bb_copyfd_eof(rpm_fd, STDOUT_FILENO) < 0)
-		bb_error_msg_and_die("error unpacking");
+		bb_simple_error_msg_and_die("error unpacking");
 
 	if (ENABLE_FEATURE_CLEAN_UP) {
 		close(rpm_fd);

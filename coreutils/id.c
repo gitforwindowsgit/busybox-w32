@@ -13,13 +13,13 @@
  * Added -G option Tito Ragusa (C) 2008 for SUSv3.
  */
 //config:config ID
-//config:	bool "id (6.7 kb)"
+//config:	bool "id (7 kb)"
 //config:	default y
 //config:	help
 //config:	id displays the current user and group ID names.
 //config:
 //config:config GROUPS
-//config:	bool "groups (6.5 kb)"
+//config:	bool "groups (6.7 kb)"
 //config:	default y
 //config:	help
 //config:	Print the group names associated with current user id.
@@ -33,7 +33,7 @@
 /* BB_AUDIT SUSv3 compliant. */
 
 //usage:#define id_trivial_usage
-//usage:       "[OPTIONS] [USER]"
+//usage:       "[-ugGnr"IF_SELINUX("Z")"] [USER]"
 //usage:#define id_full_usage "\n\n"
 //usage:       "Print information about USER or the current user\n"
 //usage:	IF_SELINUX(
@@ -231,7 +231,7 @@ int id_main(int argc UNUSED_PARAM, char **argv)
 			}
 		} else if (n < 0) { /* error in get_groups() */
 			if (ENABLE_DESKTOP)
-				bb_error_msg_and_die("can't get groups");
+				bb_simple_error_msg_and_die("can't get groups");
 			return EXIT_FAILURE;
 		}
 		if (ENABLE_FEATURE_CLEAN_UP)
@@ -258,7 +258,7 @@ int id_main(int argc UNUSED_PARAM, char **argv)
 			bb_error_msg_and_die("can't get process context%s",
 				username ? " for a different user" : "");
 		}
-		fputs(scontext, stdout);
+		fputs_stdout(scontext);
 	}
 	/* freecon(NULL) seems to be harmless */
 	if (ENABLE_FEATURE_CLEAN_UP)

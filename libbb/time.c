@@ -90,7 +90,11 @@ void FAST_FUNC parse_datestr(const char *date_str, struct tm *ptm)
 		ptm->tm_mon -= 1; /* Adjust month from 1-12 to 0-11 */
 	} else
 	if (date_str[0] == '@') {
-		time_t t = bb_strtol(date_str + 1, NULL, 10);
+		time_t t;
+		if (sizeof(t) <= sizeof(long))
+			t = bb_strtol(date_str + 1, NULL, 10);
+		else /* time_t is 64 bits but longs are smaller */
+			t = bb_strtoll(date_str + 1, NULL, 10);
 		if (!errno) {
 			struct tm *lt = localtime(&t);
 			if (lt) {
@@ -184,6 +188,7 @@ void FAST_FUNC parse_datestr(const char *date_str, struct tm *ptm)
 			ptm->tm_year -= 1900; /* Adjust years */
 			ptm->tm_mon -= 1; /* Adjust month from 1-12 to 0-11 */
 		} else {
+ err:
 			bb_error_msg_and_die(bb_msg_invalid_date, date_str);
 		}
 		ptm->tm_sec = 0; /* assume zero if [.SS] is not given */
@@ -193,6 +198,19 @@ void FAST_FUNC parse_datestr(const char *date_str, struct tm *ptm)
 					&ptm->tm_sec, &end) == 1)
 				end = '\0';
 			/* else end != NUL and we error out */
+		}
+		/* Users were confused by "date -s 20180923"
+		 * working (not in the way they were expecting).
+		 * It was interpreted as MMDDhhmm, and not bothered by
+		 * "month #20" in the least. Prevent such cases:
+		 */
+		if (ptm->tm_sec > 60 /* allow "23:60" leap second */
+		 || ptm->tm_min > 59
+		 || ptm->tm_hour > 23
+		 || ptm->tm_mday > 31
+		 || ptm->tm_mon > 11 /* month# is 0..11, not 1..12 */
+		) {
+			goto err;
 		}
 	}
 	if (end != '\0') {
@@ -232,19 +250,16 @@ char* FAST_FUNC strftime_YYYYMMDDHHMMSS(char *buf, unsigned len, time_t *tp)
 
 #if ENABLE_MONOTONIC_SYSCALL
 
-#include <sys/syscall.h>
 /* Old glibc (< 2.3.4) does not provide this constant. We use syscall
  * directly so this definition is safe. */
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_MONOTONIC 1
 #endif
 
-/* libc has incredibly messy way of doing this,
- * typically requiring -lrt. We just skip all this mess */
 static void get_mono(struct timespec *ts)
 {
-	if (syscall(__NR_clock_gettime, CLOCK_MONOTONIC, ts))
-		bb_error_msg_and_die("clock_gettime(MONOTONIC) failed");
+	if (clock_gettime(CLOCK_MONOTONIC, ts))
+		bb_simple_error_msg_and_die("clock_gettime(MONOTONIC) failed");
 }
 unsigned long long FAST_FUNC monotonic_ns(void)
 {
@@ -276,19 +291,19 @@ unsigned FAST_FUNC monotonic_sec(void)
 unsigned long long FAST_FUNC monotonic_ns(void)
 {
 	struct timeval tv;
-	gettimeofday(&tv, NULL);
+	xgettimeofday(&tv);
 	return tv.tv_sec * 1000000000ULL + tv.tv_usec * 1000;
 }
 unsigned long long FAST_FUNC monotonic_us(void)
 {
 	struct timeval tv;
-	gettimeofday(&tv, NULL);
+	xgettimeofday(&tv);
 	return tv.tv_sec * 1000000ULL + tv.tv_usec;
 }
 unsigned long long FAST_FUNC monotonic_ms(void)
 {
 	struct timeval tv;
-	gettimeofday(&tv, NULL);
+	xgettimeofday(&tv);
 	return tv.tv_sec * 1000ULL + tv.tv_usec / 1000;
 }
 unsigned FAST_FUNC monotonic_sec(void)

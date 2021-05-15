@@ -12,6 +12,7 @@ Config.in
 #
 # Never ignore these
 #
+!.github
 !.gitignore
 
 #
@@ -21,6 +22,7 @@ Config.in
 /busybox.exe
 /busybox_old
 /busybox_unstripped*
+win32/resources/busybox-w32.manifest
 
 #
 # Backups / patches
@@ -51,3 +53,14 @@ cscope.files
 cscope.in.out
 cscope.out
 cscope.po.out
+
+#
+# ctags output
+#
+tags
+TAGS
+
+#
+# user-supplied scripts
+#
+/embed

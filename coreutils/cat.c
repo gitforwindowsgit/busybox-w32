@@ -112,10 +112,10 @@ static int catv(unsigned opts, char **argv)
 	int retval = EXIT_SUCCESS;
 	int fd;
 #if ENABLE_FEATURE_CATN
-	unsigned lineno = 0;
-	unsigned eol_char = (opts & (CAT_OPT_n|CAT_OPT_b)) ? '\n' : 0x100;
+	bool eol_seen = (opts & (CAT_OPT_n|CAT_OPT_b));
+	unsigned eol_char = (eol_seen ? '\n' : 0x100);
 	unsigned skip_num_on = (opts & CAT_OPT_b) ? '\n' : 0x100;
-	bool eol_seen = 1;
+	unsigned lineno = 0;
 #endif
 
 	BUILD_BUG_ON(CAT_OPT_e != VISIBLE_ENDLINE);
@@ -152,7 +152,7 @@ static int catv(unsigned opts, char **argv)
 				eol_seen = (c == eol_char);
 #endif
 				visible(c, buf, opts);
-				fputs(buf, stdout);
+				fputs_stdout(buf);
 			}
 		}
 		if (ENABLE_FEATURE_CLEAN_UP && fd)
@@ -168,9 +168,12 @@ static int catv(unsigned opts, char **argv)
 int cat_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int cat_main(int argc UNUSED_PARAM, char **argv)
 {
+#if ENABLE_FEATURE_CATV || ENABLE_FEATURE_CATN
 	unsigned opts;
 
-	opts = getopt32(argv, IF_FEATURE_CATV("^")
+	opts =
+#endif
+	getopt32(argv, IF_FEATURE_CATV("^")
 		/* -u is ignored ("unbuffered") */
 		IF_FEATURE_CATV("etvA")IF_FEATURE_CATN("nb")"u"
 		IF_FEATURE_CATV("\0" "Aetv" /* -A == -vet */)
@@ -192,18 +195,20 @@ int cat_main(int argc UNUSED_PARAM, char **argv)
 # define CAT_OPT_b (1<<1)
 	if (opts & (CAT_OPT_n|CAT_OPT_b)) { /* -n or -b */
 		struct number_state ns;
+		int exitcode;
 
 		ns.width = 6;
 		ns.start = 1;
 		ns.inc = 1;
 		ns.sep = "\t";
-		ns.empty_str = "\n";
+		ns.empty_str = NULL;
 		ns.all = !(opts & CAT_OPT_b); /* -n without -b */
 		ns.nonempty = (opts & CAT_OPT_b); /* -b (with or without -n) */
+		exitcode = EXIT_SUCCESS;
 		do {
-			print_numbered_lines(&ns, *argv);
+			exitcode |= print_numbered_lines(&ns, *argv);
 		} while (*++argv);
-		fflush_stdout_and_exit(EXIT_SUCCESS);
+		fflush_stdout_and_exit(exitcode);
 	}
 	/*opts >>= 2;*/
 #endif

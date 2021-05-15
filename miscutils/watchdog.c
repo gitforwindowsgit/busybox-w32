@@ -9,9 +9,8 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config WATCHDOG
-//config:	bool "watchdog (5.1 kb)"
+//config:	bool "watchdog (5.3 kb)"
 //config:	default y
-//config:	select PLATFORM_LINUX
 //config:	help
 //config:	The watchdog utility is used with hardware or software watchdog
 //config:	device drivers. It opens the specified watchdog device special file
@@ -64,7 +63,7 @@ static void shutdown_watchdog(void)
 
 static void shutdown_on_signal(int sig UNUSED_PARAM)
 {
-	remove_pidfile(CONFIG_PID_FILE_PATH "/watchdog.pid");
+	remove_pidfile_std_path_and_ext("watchdog");
 	shutdown_watchdog();
 	_exit(EXIT_SUCCESS);
 }
@@ -89,7 +88,7 @@ int watchdog_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int watchdog_main(int argc UNUSED_PARAM, char **argv)
 {
 	static const int enable = WDIOS_ENABLECARD;
-	static const struct suffix_mult suffixes[] = {
+	static const struct suffix_mult suffixes[] ALIGN_SUFFIX = {
 		{ "ms", 1 },
 		{ "", 1000 },
 		{ "", 0 }
@@ -136,7 +135,7 @@ int watchdog_main(int argc UNUSED_PARAM, char **argv)
 		stimer_duration, htimer_duration * 1000);
 #endif
 
-	write_pidfile(CONFIG_PID_FILE_PATH "/watchdog.pid");
+	write_pidfile_std_path_and_ext("watchdog");
 
 	while (1) {
 		/*
@@ -144,7 +143,7 @@ int watchdog_main(int argc UNUSED_PARAM, char **argv)
 		 * as the counter value is undefined at this point -- PFM
 		 */
 		write(3, "", 1); /* write zero byte */
-		usleep(stimer_duration * 1000L);
+		msleep(stimer_duration);
 	}
 	return EXIT_SUCCESS; /* - not reached, but gcc 4.2.1 is too dumb! */
 }

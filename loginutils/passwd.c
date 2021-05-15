@@ -28,7 +28,7 @@
 //kbuild:lib-$(CONFIG_PASSWD) += passwd.o
 
 //usage:#define passwd_trivial_usage
-//usage:       "[OPTIONS] [USER]"
+//usage:       "[-a ALG] [-dlu] [USER]"
 //usage:#define passwd_full_usage "\n\n"
 //usage:       "Change USER's password (default: current user)"
 //usage:     "\n"
@@ -39,12 +39,11 @@
 
 #include "libbb.h"
 #include <syslog.h>
-#include <sys/resource.h> /* setrlimit */
 
 static char* new_password(const struct passwd *pw, uid_t myuid, const char *algo)
 {
 	char salt[MAX_PW_SALT_LEN];
-	char *orig = (char*)"";
+	char *orig = NULL;
 	char *newp = NULL;
 	char *cp = NULL;
 	char *ret = NULL; /* failure so far */
@@ -52,32 +51,30 @@ static char* new_password(const struct passwd *pw, uid_t myuid, const char *algo
 	if (myuid != 0 && pw->pw_passwd[0]) {
 		char *encrypted;
 
-		orig = bb_ask_stdin("Old password: "); /* returns ptr to static */
+		orig = bb_ask_noecho_stdin("Old password: "); /* returns malloced str */
 		if (!orig)
 			goto err_ret;
 		encrypted = pw_encrypt(orig, pw->pw_passwd, 1); /* returns malloced str */
 		if (strcmp(encrypted, pw->pw_passwd) != 0) {
 			syslog(LOG_WARNING, "incorrect password for %s", pw->pw_name);
-			bb_do_delay(LOGIN_FAIL_DELAY);
+			pause_after_failed_login();
 			puts("Incorrect password");
 			goto err_ret;
 		}
 		if (ENABLE_FEATURE_CLEAN_UP)
 			free(encrypted);
 	}
-	orig = xstrdup(orig); /* or else bb_ask_stdin() will destroy it */
-	newp = bb_ask_stdin("New password: "); /* returns ptr to static */
+	newp = bb_ask_noecho_stdin("New password: "); /* returns malloced str */
 	if (!newp)
 		goto err_ret;
-	newp = xstrdup(newp); /* we are going to bb_ask_stdin() again, so save it */
 	if (ENABLE_FEATURE_PASSWD_WEAK_CHECK
-	 && obscure(orig, newp, pw)
+	 && obscure(orig, newp, pw) /* NB: passing NULL orig is ok */
 	 && myuid != 0
 	) {
 		goto err_ret; /* non-root is not allowed to have weak passwd */
 	}
 
-	cp = bb_ask_stdin("Retype password: ");
+	cp = bb_ask_noecho_stdin("Retype password: ");
 	if (!cp)
 		goto err_ret;
 	if (strcmp(cp, newp) != 0) {
@@ -99,6 +96,7 @@ static char* new_password(const struct passwd *pw, uid_t myuid, const char *algo
 	if (ENABLE_FEATURE_CLEAN_UP) free(newp);
 
 	nuke_str(cp);
+	if (ENABLE_FEATURE_CLEAN_UP) free(cp);
 	return ret;
 }
 
@@ -230,7 +228,7 @@ int passwd_main(int argc UNUSED_PARAM, char **argv)
 	/* LOGMODE_BOTH */
 	if (rc < 0)
 		bb_error_msg_and_die("can't update password file %s", filename);
-	bb_error_msg("password for %s changed by %s", name, myname);
+	bb_info_msg("password for %s changed by %s", name, myname);
 
 	/*if (ENABLE_FEATURE_CLEAN_UP) free(newp); - can't, it may be non-malloced */
  skip:

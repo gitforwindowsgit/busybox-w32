@@ -110,10 +110,12 @@
  * when compared to "standard" nc
  */
 
+#if !ENABLE_PLATFORM_MINGW32
 static void timeout(int signum UNUSED_PARAM)
 {
-	bb_error_msg_and_die("timed out");
+	bb_simple_error_msg_and_die("timed out");
 }
+#endif
 
 int nc_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int nc_main(int argc, char **argv)
@@ -123,11 +125,15 @@ int nc_main(int argc, char **argv)
 	int cfd = 0;
 	unsigned lport = 0;
 	IF_NOT_NC_SERVER(const) unsigned do_listen = 0;
+#if !ENABLE_PLATFORM_MINGW32
 	IF_NOT_NC_EXTRA (const) unsigned wsecs = 0;
 	IF_NOT_NC_EXTRA (const) unsigned delay = 0;
 	IF_NOT_NC_EXTRA (const int execparam = 0;)
 	IF_NC_EXTRA     (char **execparam = NULL;)
+	struct pollfd pfds[2];
+#else
 	fd_set readfds, testfds;
+#endif
 	int opt; /* must be signed (getopt returns -1) */
 
 	if (ENABLE_NC_SERVER || ENABLE_NC_EXTRA) {
@@ -187,10 +193,12 @@ int nc_main(int argc, char **argv)
 		argv++;
 	}
 
+#if !ENABLE_PLATFORM_MINGW32
 	if (wsecs) {
 		signal(SIGALRM, timeout);
 		alarm(wsecs);
 	}
+#endif
 
 	if (!cfd) {
 		if (do_listen) {
@@ -208,11 +216,13 @@ int nc_main(int argc, char **argv)
 			}
 #endif
 			close_on_exec_on(sfd);
- IF_NC_EXTRA(accept_again:)
+ IF_NOT_PLATFORM_MINGW32(accept_again:)
 			cfd = accept(sfd, NULL, 0);
 			if (cfd < 0)
-				bb_perror_msg_and_die("accept");
+				bb_simple_perror_msg_and_die("accept");
+#if !ENABLE_PLATFORM_MINGW32
 			if (!execparam)
+#endif
 				close(sfd);
 		} else {
 			cfd = create_and_connect_stream_or_die(argv[0],
@@ -220,13 +230,13 @@ int nc_main(int argc, char **argv)
 		}
 	}
 
+#if !ENABLE_PLATFORM_MINGW32
 	if (wsecs) {
 		alarm(0);
 		/* Non-ignored signals revert to SIG_DFL on exec anyway */
 		/*signal(SIGALRM, SIG_DFL);*/
 	}
 
-#if ENABLE_NC_EXTRA
 	/* -e given? */
 	if (execparam) {
 		pid_t pid;
@@ -247,14 +257,57 @@ int nc_main(int argc, char **argv)
 	}
 #endif
 
-	/* Select loop copying stdin to cfd, and cfd to stdout */
+	/* loop copying stdin to cfd, and cfd to stdout */
 
+#if !ENABLE_PLATFORM_MINGW32
+	pfds[0].fd = STDIN_FILENO;
+	pfds[0].events = POLLIN;
+	pfds[1].fd = cfd;
+	pfds[1].events = POLLIN;
+#else
 	FD_ZERO(&readfds);
 	FD_SET(cfd, &readfds);
 	FD_SET(STDIN_FILENO, &readfds);
+#endif
 
 #define iobuf bb_common_bufsiz1
 	setup_common_bufsiz();
+#if !ENABLE_PLATFORM_MINGW32
+	for (;;) {
+		int fdidx;
+		int ofd;
+		int nread;
+
+		if (safe_poll(pfds, 2, -1) < 0)
+			bb_simple_perror_msg_and_die("poll");
+
+		fdidx = 0;
+		while (1) {
+			if (pfds[fdidx].revents) {
+				nread = safe_read(pfds[fdidx].fd, iobuf, COMMON_BUFSIZE);
+				if (fdidx != 0) {
+					if (nread < 1)
+						exit(EXIT_SUCCESS);
+					ofd = STDOUT_FILENO;
+				} else {
+					if (nread < 1) {
+						/* Close outgoing half-connection so they get EOF,
+						 * but leave incoming alone so we can see response */
+						shutdown(cfd, SHUT_WR);
+						pfds[0].fd = -1;
+					}
+					ofd = cfd;
+				}
+				xwrite(ofd, iobuf, nread);
+				if (delay > 0)
+					sleep(delay);
+			}
+			if (fdidx == 1)
+				break;
+			fdidx++;
+		}
+	}
+#else
 	for (;;) {
 		int fd;
 		int ofd;
@@ -263,7 +316,7 @@ int nc_main(int argc, char **argv)
 		testfds = readfds;
 
 		if (select(cfd + 1, &testfds, NULL, NULL, NULL) < 0)
-			bb_perror_msg_and_die("select");
+			bb_simple_perror_msg_and_die("select");
 
 		fd = STDIN_FILENO;
 		while (1) {
@@ -283,13 +336,12 @@ int nc_main(int argc, char **argv)
 					ofd = cfd;
 				}
 				xwrite(ofd, iobuf, nread);
-				if (delay > 0)
-					sleep(delay);
 			}
 			if (fd == cfd)
 				break;
 			fd = cfd;
 		}
 	}
+#endif
 }
 #endif

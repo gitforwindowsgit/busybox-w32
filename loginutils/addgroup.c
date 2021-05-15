@@ -9,7 +9,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config ADDGROUP
-//config:	bool "addgroup (8.2 kb)"
+//config:	bool "addgroup (8.6 kb)"
 //config:	default y
 //config:	select LONG_OPTS
 //config:	help
@@ -142,19 +142,24 @@ static const char addgroup_longopts[] ALIGN1 =
 int addgroup_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int addgroup_main(int argc UNUSED_PARAM, char **argv)
 {
+#if ENABLE_FEATURE_ADDUSER_TO_GROUP
 	unsigned opts;
+#endif
 	const char *gid = "0";
 
 	/* need to be root */
 	if (geteuid()) {
-		bb_error_msg_and_die(bb_msg_perm_denied_are_you_root);
+		bb_simple_error_msg_and_die(bb_msg_perm_denied_are_you_root);
 	}
 	/* Syntax:
 	 *  addgroup group
 	 *  addgroup --gid num group
 	 *  addgroup user group
 	 * Check for min, max and missing args */
-	opts = getopt32long(argv, "^" "g:S" "\0" "-1:?2", addgroup_longopts,
+#if ENABLE_FEATURE_ADDUSER_TO_GROUP
+	opts =
+#endif
+	getopt32long(argv, "^" "g:S" "\0" "-1:?2", addgroup_longopts,
 				&gid
 	);
 	/* move past the commandline options */

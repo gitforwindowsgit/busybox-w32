@@ -8,7 +8,7 @@
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
 //config:config KILL
-//config:	bool "kill (2.6 kb)"
+//config:	bool "kill (3.1 kb)"
 //config:	default y
 //config:	help
 //config:	The command kill sends the specified signal to the specified
@@ -108,7 +108,10 @@ int kill_main(int argc UNUSED_PARAM, char **argv)
 {
 	char *arg;
 	pid_t pid;
-	int signo = SIGTERM, errors = 0, quiet = 0;
+	int signo = SIGTERM, errors = 0;
+#if ENABLE_KILL || ENABLE_KILLALL
+	int quiet = 0;
+#endif
 
 #if KILL_APPLET_CNT == 1
 # define is_killall  ENABLE_KILLALL
@@ -170,7 +173,9 @@ int kill_main(int argc UNUSED_PARAM, char **argv)
 
 	/* The -q quiet option */
 	if (is_killall && arg[1] == 'q' && arg[2] == '\0') {
+#if ENABLE_KILL || ENABLE_KILLALL
 		quiet = 1;
+#endif
 		arg = *++argv;
 		if (!arg)
 			bb_show_usage();
@@ -202,6 +207,7 @@ int kill_main(int argc UNUSED_PARAM, char **argv)
  do_it_now:
 	pid = getpid();
 
+#if ENABLE_KILLALL5
 	if (is_killall5) {
 		pid_t sid;
 		procps_status_t* p = NULL;
@@ -259,11 +265,12 @@ int kill_main(int argc UNUSED_PARAM, char **argv)
 			kill(-1, SIGCONT);
 		return errors;
 	}
+#endif
 
 #if ENABLE_KILL || ENABLE_KILLALL
 	/* Pid or name is required for kill/killall */
 	if (!arg) {
-		bb_error_msg("you need to specify whom to kill");
+		bb_simple_error_msg("you need to specify whom to kill");
 		return EXIT_FAILURE;
 	}
 

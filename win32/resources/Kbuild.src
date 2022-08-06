@@ -21,8 +21,9 @@ WRFLAGS := -D"KBUILD_STR(s)=\#s" -D"BB_VER=KBUILD_STR($(BB_VER))" \
 quiet_cmd_windres = WINDRES $@
       cmd_windres = $(WINDRES) $(WRFLAGS) $< $@
 
-%.o: %.rc FORCE
+%.o: %.rc
 	$(call if_changed,windres)
 
 win32/resources/resources.o: win32/resources/resources.rc .config
 win32/resources/resources.o: win32/resources/aterm.ico win32/resources/sterm.ico
+win32/resources/resources.o: Makefile Makefile.flags

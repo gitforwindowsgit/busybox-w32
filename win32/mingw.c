@@ -1568,6 +1568,25 @@ int create_junction(const char *oldpath, const char *newpath)
 	return -1;
 }
 
+static wchar_t *normalize_ntpath(wchar_t *wbuf)
+{
+	/* fix absolute path prefixes */
+	if (wbuf[0] == L'\\') {
+		/* strip NT namespace prefixes */
+		if (!wcsncmp(wbuf, L"\\??\\", 4) ||
+		    !wcsncmp(wbuf, L"\\\\?\\", 4))
+			wbuf += 4;
+		else if (!_wcsnicmp(wbuf, L"\\DosDevices\\", 12))
+			wbuf += 12;
+		/* replace remaining '...UNC\' with '\\' */
+		if (!_wcsnicmp(wbuf, L"UNC\\", 4)) {
+			wbuf += 2;
+			*wbuf = L'\\';
+		}
+	}
+	return wbuf;
+}
+
 static char *normalize_ntpathA(char *buf)
 {
 	/* fix absolute path prefixes */
@@ -1658,30 +1677,6 @@ char *realpath(const char *path, char *resolved_path)
 	return NULL;
 }
 
-static wchar_t *normalize_ntpath(wchar_t *wbuf)
-{
-	int i;
-	/* fix absolute path prefixes */
-	if (wbuf[0] == '\\') {
-		/* strip NT namespace prefixes */
-		if (!wcsncmp(wbuf, L"\\??\\", 4) ||
-		    !wcsncmp(wbuf, L"\\\\?\\", 4))
-			wbuf += 4;
-		else if (!wcsnicmp(wbuf, L"\\DosDevices\\", 12))
-			wbuf += 12;
-		/* replace remaining '...UNC\' with '\\' */
-		if (!wcsnicmp(wbuf, L"UNC\\", 4)) {
-			wbuf += 2;
-			*wbuf = '\\';
-		}
-	}
-	/* convert backslashes to slashes */
-	for (i = 0; wbuf[i]; i++)
-		if (wbuf[i] == '\\')
-			wbuf[i] = '/';
-	return wbuf;
-}
-
 #define SRPB rptr->SymbolicLinkReparseBuffer
 /* Non-standard feature:  if buf is NULL just return the length. */
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
@@ -1718,8 +1713,15 @@ ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
 			len = wcslen(name);
 			if (len > bufsiz)
 				len = bufsiz;
-			if (WideCharToMultiByte(CP_ACP, 0, name, len, buf, bufsiz, 0, 0))
+			len = WideCharToMultiByte(CP_ACP, 0, name, len, buf, bufsiz, 0, 0);
+			if (len) {
+				int i;
+
+				for (i = 0; i < len; i++)
+					if (buf[i] == '\\')
+						buf[i] = '/';
 				return len;
+			}
 		}
 	}
 	errno = err_win_to_posix();
